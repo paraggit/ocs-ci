@@ -12,13 +12,13 @@ log = logging.getLogger(__name__)
 
 
 @green_squad
-@pytest.mark.skipif(
-    not is_rbd_default_storage_class(),
-    reason="RBD is not default storageclass for Cluster.",
-)
 class TestRBDStorageClassAsDefaultStorageClass:
     @tier1
     @polarion_id("OCS-5459")
+    @pytest.mark.skipif(
+        not is_rbd_default_storage_class(),
+        reason="RBD is not default storageclass for Cluster.",
+    )
     def test_pvc_creation_without_storageclass_name(self, pvc_factory, pod_factory):
         """
         Test PVC creation without mentioning storageclass name in the spec.
