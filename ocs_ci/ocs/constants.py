@@ -1205,6 +1205,14 @@ NUM_OF_VIPS = 2
 
 # Config related constants
 config_keys_patterns_to_censor = ["passw", "token", "secret", "key", "credential"]
+config_keys_expressions_to_censor = [
+    "AccountKey",
+    "AccountName",
+    "ApplicationID",
+    "ApplicationSecret",
+    "LogsAnalyticsWorkspaceID",
+    "TenantID",
+]
 
 # packages
 RHEL_POD_PACKAGES = [
@@ -1855,8 +1863,10 @@ AWS_VOL_MON_SIZE = 50
 AWS_VOL_MON_IOPS = 3000
 
 # Bare Metal constants
-PXE_CONF_FILE = os.path.join(TEMPLATE_DIR, "ocp-deployment", "dnsmasq.pxe.conf")
-COMMON_CONF_FILE = os.path.join(TEMPLATE_DIR, "ocp-deployment", "dnsmasq.common.conf")
+DNSMASQ_PXE_CONF_FILE_TEMPLATE = os.path.join("ocp-deployment", "dnsmasq.pxe.conf.j2")
+DNSMASQ_COMMON_CONF_FILE_TEMPLATE = os.path.join(
+    "ocp-deployment", "dnsmasq.common.conf.j2"
+)
 RHCOS_IMAGES_FILE = os.path.join(TEMPLATE_DIR, "ocp-deployment", "rhcos_images.yaml")
 PXE_FILE = os.path.join(TEMPLATE_DIR, "baremetal-pxefile")
 coreos_url_prefix = "https://mirror.openshift.com/pub/openshift-v4/dependencies/rhcos"

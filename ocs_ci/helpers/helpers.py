@@ -1,6 +1,7 @@
 """
 Helper functions file for OCS QE
 """
+
 import base64
 import random
 import datetime
@@ -3120,17 +3121,25 @@ def default_volumesnapshotclass(interface_type):
         resource_name = (
             constants.DEFAULT_EXTERNAL_MODE_VOLUMESNAPSHOTCLASS_RBD
             if external
-            else constants.DEFAULT_VOLUMESNAPSHOTCLASS_RBD_MS_PC
-            if (config.ENV_DATA["platform"].lower() in constants.HCI_PC_OR_MS_PLATFORM)
-            else constants.DEFAULT_VOLUMESNAPSHOTCLASS_RBD
+            else (
+                constants.DEFAULT_VOLUMESNAPSHOTCLASS_RBD_MS_PC
+                if (
+                    config.ENV_DATA["platform"].lower()
+                    in constants.HCI_PC_OR_MS_PLATFORM
+                )
+                else constants.DEFAULT_VOLUMESNAPSHOTCLASS_RBD
+            )
         )
     elif interface_type == constants.CEPHFILESYSTEM:
         resource_name = (
             constants.DEFAULT_EXTERNAL_MODE_VOLUMESNAPSHOTCLASS_CEPHFS
             if external
-            else constants.DEFAULT_VOLUMESNAPSHOTCLASS_CEPHFS_MS_PC
-            if config.ENV_DATA["platform"].lower() in constants.HCI_PC_OR_MS_PLATFORM
-            else constants.DEFAULT_VOLUMESNAPSHOTCLASS_CEPHFS
+            else (
+                constants.DEFAULT_VOLUMESNAPSHOTCLASS_CEPHFS_MS_PC
+                if config.ENV_DATA["platform"].lower()
+                in constants.HCI_PC_OR_MS_PLATFORM
+                else constants.DEFAULT_VOLUMESNAPSHOTCLASS_CEPHFS
+            )
         )
     base_snapshot_class = OCP(
         kind=constants.VOLUMESNAPSHOTCLASS, resource_name=resource_name
@@ -4675,3 +4684,29 @@ def is_rbd_default_storage_class(custom_sc=None):
 
     logger.error("Storageclass {default_rbd_sc} is not a default  RBD StorageClass.")
     return False
+
+
+def flatten_multilevel_dict(d):
+    """
+    Recursively extracts the leaves of a multi-level dictionary and returns them as a list.
+
+    Args:
+        d (dict): The multi-level dictionary.
+
+    Returns:
+        list: A list containing the leaves of the dictionary.
+
+    """
+    leaves_list = []
+    for value in d.values():
+        if isinstance(value, dict):
+            leaves_list.extend(flatten_multilevel_dict(value))
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, (dict, list)):
+                    leaves_list.extend(flatten_multilevel_dict({"": item}))
+                else:
+                    leaves_list.append(item)
+        else:
+            leaves_list.append(value)
+    return leaves_list
