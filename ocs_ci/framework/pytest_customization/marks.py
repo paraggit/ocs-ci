@@ -592,9 +592,9 @@ ignore_owner = pytest.mark.ignore_owner
 # Marks to identify the cluster type in which the test case should run
 runs_on_provider = pytest.mark.runs_on_provider
 
-baremetal_deployment_required = pytest.mark.skipif(
-    not config.ENV_DATA["platform"].lower() == "baremetal",
-    reason="Test required baremetal deployment",
+baremetal_or_vsphere_deployment_required = pytest.mark.skipif(
+    config.ENV_DATA["platform"].lower() not in ["baremetal", "vsphere"],
+    reason="Test required baremetal or vsphere deployment.",
 )
 
 ui_deployment_required = pytest.mark.skipif(
