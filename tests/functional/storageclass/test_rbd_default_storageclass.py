@@ -1,24 +1,27 @@
-import pytest
 import logging
 from ocs_ci.helpers.helpers import is_rbd_default_storage_class
 from ocs_ci.ocs import constants
 from ocs_ci.utility import templating
 from ocs_ci.helpers.helpers import create_unique_resource_name
 from ocs_ci.helpers.helpers import default_storage_class
-from ocs_ci.framework.pytest_customization.marks import tier1, green_squad, polarion_id
+from ocs_ci.framework.pytest_customization.marks import (
+    tier1,
+    green_squad,
+    polarion_id,
+    baremetal_deployment_required,
+    ui_deployment_required,
+)
 
 
 log = logging.getLogger(__name__)
 
 
 @green_squad
+@baremetal_deployment_required
+@ui_deployment_required
 class TestRBDStorageClassAsDefaultStorageClass:
     @tier1
     @polarion_id("OCS-5459")
-    @pytest.mark.skipif(
-        not is_rbd_default_storage_class(),
-        reason="RBD is not default storageclass for Cluster.",
-    )
     def test_pvc_creation_without_storageclass_name(self, pvc_factory, pod_factory):
         """
         Test PVC creation without mentioning storageclass name in the spec.
@@ -30,6 +33,10 @@ class TestRBDStorageClassAsDefaultStorageClass:
             4. Create a POD and attached the  above PVC to the Pod.
             5. Start IO on verify that IO is successful on the PV.
         """
+        assert (
+            is_rbd_default_storage_class()
+        ), "RBD is not default storageclass for Cluster."
+
         pvc_data = templating.load_yaml(constants.CSI_PVC_YAML)
         pvc_data["metadata"]["name"] = create_unique_resource_name("test", "pvc")
         log.info("Removing 'storageClassName' Parameter from the PVC yaml file.")
