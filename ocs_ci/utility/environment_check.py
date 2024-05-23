@@ -2,6 +2,7 @@
 Util for environment check before and after test to compare and find stale
 leftovers
 """
+
 import copy
 import logging
 import yaml
@@ -22,10 +23,10 @@ def compare_dicts(before, after):
 
     Returns:
         list: List of 2 lists - ('added' and 'removed' are lists)
-        None: If both parameters are None
+        None: If both parameters or one of the parameters is None
     """
-    if not before and not after:
-        log.debug("compare_dicts: both before and after are None")
+    if (not before) or (not after):
+        log.debug("compare_dicts: Both 'before' and 'after', or either one is None.")
         return None
 
     added = []
