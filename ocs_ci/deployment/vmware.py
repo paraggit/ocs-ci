@@ -85,12 +85,13 @@ from .flexy import FlexyVSPHEREUPI
 from ocs_ci.utility.vsphere import VSPHERE
 from ocs_ci.utility.connection import Connection
 from ocs_ci.ocs.exceptions import ConnectivityFail
+from ocs_ci.deployment import assisted_installer
 
 logger = logging.getLogger(__name__)
 
 
 # As of now only UPI
-__all__ = ["VSPHEREUPI", "VSPHEREIPI"]
+__all__ = ["VSPHEREUPI", "VSPHEREIPI", "VSPHEREAI"]
 
 
 class VSPHEREBASE(Deployment):
@@ -190,13 +191,7 @@ class VSPHEREBASE(Deployment):
         config.ENV_DATA["vsphere_resource_pool"] = config.ENV_DATA.get("cluster_name")
 
         # sync guest time with host
-        sync_time_with_host_file = constants.SCALEUP_VSPHERE_MACHINE_CONF
-        if config.ENV_DATA["folder_structure"]:
-            sync_time_with_host_file = os.path.join(
-                constants.CLUSTER_LAUNCHER_VSPHERE_DIR,
-                f"aos-{get_ocp_version(seperator='_')}",
-                constants.CLUSTER_LAUNCHER_MACHINE_CONF,
-            )
+        sync_time_with_host_file = helpers.get_host_file_for_time_sync()
         if config.ENV_DATA.get("sync_time_with_host"):
             sync_time_with_host(sync_time_with_host_file, True)
 
@@ -212,7 +207,10 @@ class VSPHEREBASE(Deployment):
         # choose the vsphere_dir based on OCP version
         # generate cluster_info and config yaml files
         # for OCP version greater than 4.4
-        vsphere_dir = constants.SCALEUP_VSPHERE_DIR
+        vsphere_dir = os.path.join(
+            constants.EXTERNAL_DIR,
+            f"v4-scaleup/ocp4-rhel-scaleup/aos-{get_ocp_version(seperator='_')}/vsphere",
+        )
         rhel_module = "rhel-worker"
         if Version.coerce(self.ocp_version) >= Version.coerce("4.5"):
             vsphere_dir = os.path.join(
@@ -950,6 +948,11 @@ class VSPHEREUPI(VSPHEREBASE):
                     f"worker-machineset-*.yaml"
                 )
             )
+            files_to_remove.extend(
+                glob.glob(
+                    f"{manifest_files_path}/99_openshift-machine-api_master-control-plane-machine-set.yaml"
+                )
+            )
             logger.debug(f"Removing machines and machineset files: {files_to_remove}")
             for each_file in files_to_remove:
                 os.remove(each_file)
@@ -1396,6 +1399,9 @@ class VSPHEREUPI(VSPHEREBASE):
             hosts = [f"{constants.SNO_NODE_NAME}.{config.ENV_DATA['cluster_name']}"]
             ipam.release_ips(hosts)
 
+        # Delete pgsql DB
+        self.cleanup_pgsql_db()
+
         # post destroy checks
         self.post_destroy_checks()
 
@@ -1420,7 +1426,10 @@ class VSPHEREUPI(VSPHEREBASE):
         helpers = VSPHEREHELPERS()
         helpers.modify_scaleup_repo()
 
-        vsphere_dir = constants.SCALEUP_VSPHERE_DIR
+        vsphere_dir = os.path.join(
+            constants.EXTERNAL_DIR,
+            f"v4-scaleup/ocp4-rhel-scaleup/aos-{get_ocp_version(seperator='_')}/vsphere",
+        )
         if Version.coerce(self.ocp_version) >= Version.coerce("4.5"):
             vsphere_dir = os.path.join(
                 constants.CLUSTER_LAUNCHER_VSPHERE_DIR,
@@ -1553,6 +1562,13 @@ class VSPHEREIPI(VSPHEREBASE):
         installer = get_openshift_installer(
             config.DEPLOYMENT["installer_version"], force_download=force_download
         )
+        metadata_file = os.path.join(self.cluster_path, "metadata.json")
+        template_folder = None
+        if os.path.exists(metadata_file):
+            template_folder = get_infra_id(self.cluster_path)
+        else:
+            logger.warning("metadata.json file doesn't exist.")
+
         try:
             run_cmd(
                 f"{installer} destroy cluster "
@@ -1566,6 +1582,9 @@ class VSPHEREIPI(VSPHEREBASE):
         # Delete DNS records
         delete_dns_records()
 
+        # Delete pgsql DB
+        self.cleanup_pgsql_db()
+
         # release the IP's
         ipam = IPAM(appiapp="address")
         hosts = [
@@ -1573,6 +1592,328 @@ class VSPHEREIPI(VSPHEREBASE):
             for i in range(constants.NUM_OF_VIPS)
         ]
         ipam.release_ips(hosts)
+
+        # post destroy checks
+        if template_folder:
+            self.post_destroy_checks(template_folder=template_folder)
+
+    def post_destroy_checks(self, template_folder):
+        """
+        Post destroy checks on vSphere IPI cluster
+
+        Args:
+            template_folder (str): template folder for the cluster
+
+        """
+        logger.debug("post destroy checks for vSphere IPI ")
+        # destroy the folder in templates
+        self.vsphere.destroy_folder(template_folder, self.cluster, self.datacenter)
+
+
+class VSPHEREAI(VSPHEREBASE):
+    """
+    A class to handle vSphere Assisted Installer specific deployment
+    """
+
+    def __init__(self):
+        self.cluster_name = config.ENV_DATA["cluster_name"]
+        super(VSPHEREAI, self).__init__()
+
+    class OCPDeployment(BaseOCPDeployment):
+        def __init__(self):
+            super(VSPHEREAI.OCPDeployment, self).__init__()
+
+            # define local path for downloading discovery iso
+            self.discovery_iso_image = f"/tmp/{self.cluster_name}-discovery.iso"
+            # create terraform_data directory
+            self.terraform_data_dir = os.path.join(
+                self.cluster_path, constants.TERRAFORM_DATA_DIR
+            )
+            create_directory_path(self.terraform_data_dir)
+
+            # Download terraform binary based on ocp version and
+            # update the installer path in ENV_DATA
+            terraform_version = config.DEPLOYMENT["terraform_version"]
+            terraform_installer = get_terraform(version=terraform_version)
+            config.ENV_DATA["terraform_installer"] = terraform_installer
+
+            # Initialize Terraform
+            self.terraform_work_dir = os.path.join(os.getcwd(), "terraform/ai/vsphere/")
+            self.terraform = Terraform(self.terraform_work_dir)
+
+        def deploy_prereq(self):
+            """
+            Pre-Requisites for vSphere Assisted installer deployment
+            """
+            super(VSPHEREAI.OCPDeployment, self).deploy_prereq()
+
+            # create initial metadata.json file in cluster dir, to ensure, that
+            # destroy job will be properly triggered even when the deployment fails
+            # and metadata.json file will not be created
+            with open(
+                os.path.join(self.cluster_path, "metadata.json"), "w"
+            ) as metadata_file:
+                json.dump(
+                    {"clusterName": self.cluster_name, "infraID": self.cluster_name},
+                    metadata_file,
+                )
+
+            self.assign_api_ingress_ips()
+
+            # generate terraform variable file
+            self.generate_terraform_vars()
+
+        def create_config(self):
+            """
+            Creates the OCP deploy config for the vSphere - not required for Assisted installer deployment
+            """
+            logger.debug(
+                "create_config() is not required for Assisted installer deployment"
+            )
+
+        def deploy(self, log_cli_level="DEBUG"):
+            """
+            Deployment specific to OCP cluster on this platform
+
+            Args:
+                log_cli_level (str): not used for Assisted Installer deployment
+
+            """
+            logger.info(
+                "Deploying OCP cluster on vSphere platform via Assisted Installer"
+            )
+            # initialize AssistedInstallerCluster object
+            self.ai_cluster = assisted_installer.AssistedInstallerCluster(
+                name=self.cluster_name,
+                cluster_path=self.cluster_path,
+                openshift_version=str(version.get_semantic_ocp_version_from_config()),
+                base_dns_domain=config.ENV_DATA["base_domain"],
+                api_vip=self.api_vip,
+                ingress_vip=self.ingress_vip,
+                ssh_public_key=self.get_ssh_key(),
+                pull_secret=self.get_pull_secret(),
+            )
+
+            # create (register) cluster in Assisted Installer console
+            self.ai_cluster.create_cluster()
+
+            # create Infrastructure Environment in Assisted Installer console
+            self.ai_cluster.create_infrastructure_environment()
+
+            # download discovery iso
+            self.ai_cluster.download_discovery_iso(self.discovery_iso_image)
+
+            # create infrastructure in vSphere and configure DNS records for API and Ingress (via Terraform)
+            logger.info(
+                "Creating infrastructure in vSphere and DNS records for Assisted Installer deployment "
+                "(via Terraform)"
+            )
+            previous_dir = os.getcwd()
+            os.chdir(self.terraform_data_dir)
+            self.terraform.initialize()
+            self.terraform.apply(self.terraform_vars_file)
+            os.chdir(previous_dir)
+
+            # wait for discovering all nodes
+            expected_node_num = (
+                config.ENV_DATA["master_replicas"] + config.ENV_DATA["worker_replicas"]
+            )
+            self.ai_cluster.wait_for_discovered_nodes(expected_node_num)
+
+            # verify validations info
+            self.ai_cluster.verify_validations_info_for_discovered_nodes()
+
+            # load terraform.tfstate file
+            with open(self.terraform.state_file_path, "r") as tf_file:
+                tfstate = json.load(tf_file)
+            # prepare MAC addresses to node name mapping
+            mac_name_mapping = {
+                res["instances"][0]["attributes"]["network_interface"][0][
+                    "mac_address"
+                ]: res["instances"][0]["attributes"]["name"]
+                for res in tfstate["resources"]
+                if res["type"] == "vsphere_virtual_machine"
+            }
+            # prepare MAC addresses to node role mapping
+            mac_role_mapping = {
+                res["instances"][0]["attributes"]["network_interface"][0][
+                    "mac_address"
+                ]: "master"
+                if "module.control_plane_vm" in res["module"]
+                else "worker"
+                for res in tfstate["resources"]
+                if res["type"] == "vsphere_virtual_machine"
+            }
+            # update discovered hosts (configure hostname and role)
+            self.ai_cluster.update_hosts_config(
+                mac_name_mapping=mac_name_mapping, mac_role_mapping=mac_role_mapping
+            )
+
+            # install the OCP cluster
+            self.ai_cluster.install_cluster()
+
+        def generate_terraform_vars(self):
+            """
+            Generates the terraform.tfvars.json file
+            """
+            self.terraform_vars_file = os.path.join(
+                self.terraform_data_dir,
+                "terraform.tfvars.json",
+            )
+            tfvars = {
+                "cluster_id": self.cluster_name,
+                "vsphere_server": config.ENV_DATA["vsphere_server"],
+                "vsphere_user": config.ENV_DATA["vsphere_user"],
+                "vsphere_password": config.ENV_DATA["vsphere_password"],
+                "vsphere_cluster": config.ENV_DATA["vsphere_cluster"],
+                "vsphere_datacenter": config.ENV_DATA["vsphere_datacenter"],
+                "vsphere_datastore": config.ENV_DATA["vsphere_datastore"],
+                "vm_network": config.ENV_DATA["vm_network"],
+                "base_domain": config.ENV_DATA["base_domain"],
+                "api_ip": self.api_vip,
+                "ingress_ip": self.ingress_vip,
+                "iso_image": self.discovery_iso_image,
+                "control_plane_count": config.ENV_DATA["master_replicas"],
+                "compute_count": config.ENV_DATA["worker_replicas"],
+                "control_plane_memory": config.ENV_DATA["master_memory"],
+                "compute_memory": config.ENV_DATA["compute_memory"],
+                "control_plane_num_cpus": config.ENV_DATA["master_num_cpus"],
+                "compute_num_cpus": config.ENV_DATA["worker_num_cpus"],
+                "system_disk_size": constants.VM_ROOT_DISK_SIZE,
+                "control_plane_data_disks_count": config.ENV_DATA.get(
+                    "control_plane_extra_disks", 0
+                ),
+                "control_plane_data_disks_size": config.ENV_DATA.get(
+                    "device_size", defaults.DEVICE_SIZE
+                ),
+                "compute_data_disks_count": config.ENV_DATA["extra_disks"],
+                "compute_data_disks_size": config.ENV_DATA.get(
+                    "device_size", defaults.DEVICE_SIZE
+                ),
+            }
+            if config.ENV_DATA.get("vsphere_storage_policy"):
+                tfvars["vsphere_storage_policy"] = config.ENV_DATA[
+                    "vsphere_storage_policy"
+                ]
+            with open(self.terraform_vars_file, "w") as tf_var_file:
+                json.dump(tfvars, tf_var_file, indent=4)
+
+        def assign_api_ingress_ips(self):
+            """
+            Request API and Ingress IPs from IPAM server
+            """
+            ipam = IPAM(appiapp="address")
+            subnet = config.ENV_DATA["machine_cidr"].split("/")[0]
+            self.api_vip = ipam.assign_ip(f"api.{self.cluster_name}", subnet)
+            self.ingress_vip = ipam.assign_ip(f"ingress.{self.cluster_name}", subnet)
+            logger.info(
+                f"Assigned (reserved) API ({self.api_vip}) and Ingress ({self.ingress_vip}) IPs"
+            )
+
+    def deploy_ocp(self, log_cli_level="DEBUG"):
+        """
+        Deployment specific to OCP cluster on vSphere platform
+
+        Args:
+            log_cli_level (str): openshift installer's log level
+                (default: "DEBUG")
+
+        """
+        cluster_name_parts = config.ENV_DATA.get("cluster_name").split("-")
+        prefix = cluster_name_parts[0]
+        if not (
+            prefix.startswith(tuple(constants.PRODUCTION_JOBS_PREFIX))
+            or config.DEPLOYMENT.get("force_deploy_multiple_clusters")
+        ):
+            if self.check_cluster_existence(prefix):
+                raise exceptions.SameNamePrefixClusterAlreadyExistsException(
+                    f"Cluster with name prefix {prefix} already exists. "
+                    f"Please destroy the existing cluster for a new cluster "
+                    f"deployment"
+                )
+        super(VSPHEREAI, self).deploy_ocp(log_cli_level)
+
+    def destroy_cluster(self, log_level="DEBUG"):
+        """
+        Destroy OCP cluster specific to vSphere Assisted installer
+
+        Args:
+            log_level (str): this parameter is not used here
+
+        """
+        try:
+            ai_cluster = assisted_installer.AssistedInstallerCluster(
+                name=self.cluster_name,
+                cluster_path=self.cluster_path,
+                existing_cluster=True,
+            )
+            ai_cluster.delete_cluster()
+            ai_cluster.delete_infrastructure_environment()
+        except (
+            exceptions.OpenShiftAPIResponseException,
+            exceptions.ClusterNotFoundException,
+        ) as err:
+            logger.warning(
+                f"Failed to delete cluster in Assisted Installer Console: {err}\n"
+                "(ignoring the failure and continuing the destroy process to remove other resources)"
+            )
+
+        # Download terraform binary based on terraform version
+        # in terraform.log
+        terraform_version = Terraform.get_terraform_version()
+
+        terraform_installer = get_terraform(version=terraform_version)
+        config.ENV_DATA["terraform_installer"] = terraform_installer
+
+        # removing mon and osd pods and also removing PVC's to avoid stale CNS volumes
+        try:
+            scale_down_pods_and_remove_pvcs(self.DEFAULT_STORAGECLASS)
+        except Exception as err:
+            logger.warning(
+                f"Failed to scale down mon/osd pods or failed to remove PVC's. Error: {err}"
+            )
+
+        terraform_data_dir = os.path.join(
+            self.cluster_path, constants.TERRAFORM_DATA_DIR
+        )
+        tfvars = os.path.join(
+            config.ENV_DATA.get("cluster_path"),
+            constants.TERRAFORM_DATA_DIR,
+            "terraform.tfvars.json",
+        )
+
+        # terraform initialization and destroy cluster
+        try:
+            logger.info(
+                "Destroying infrastructure in vSphere and DNS records from Assisted Installer deployment "
+                "(via Terraform)"
+            )
+            terraform_work_dir = os.path.join(os.getcwd(), "terraform/ai/vsphere/")
+            terraform = Terraform(os.path.join(terraform_work_dir))
+
+            previous_dir = os.getcwd()
+            os.chdir(terraform_data_dir)
+            terraform.initialize()
+            terraform.destroy(tfvars)
+            os.chdir(previous_dir)
+        except (exceptions.CommandFailed) as err:
+            logger.warning(
+                f"Failed to destroy cluster resources via Terraform: {err}\n"
+                "(ignoring the failure and continuing the destroy process to remove other resources)"
+            )
+
+        # release IPs
+        logger.info("Releasing reserved API and Ingress IPs")
+        ipam = IPAM(appiapp="address")
+        ipam.release_ips(
+            [
+                f"api.{self.cluster_name}",
+                f"ingress.{self.cluster_name}",
+            ]
+        )
+
+        # post destroy checks
+        self.post_destroy_checks()
 
 
 class VSPHEREUPIFlexy(VSPHEREBASE):
@@ -1946,8 +2287,9 @@ def generate_terraform_vars_with_folder():
 
     # Get the infra ID from metadata.json and update in ENV_DATA
     metadata_path = os.path.join(config.ENV_DATA["cluster_path"], "metadata.json")
-    metadata_dct = json_to_dict(metadata_path)
-    config.ENV_DATA["folder"] = metadata_dct["infraID"]
+    if os.path.exists(metadata_path):
+        metadata_dct = json_to_dict(metadata_path)
+        config.ENV_DATA["folder"] = metadata_dct["infraID"]
 
     # expand ssh_public_key_path and update in ENV_DATA
     ssh_public_key_path = os.path.expanduser(config.DEPLOYMENT["ssh_key"])
@@ -2101,20 +2443,57 @@ def modify_haproxyservice():
         )
 
 
-def assign_ips(num_of_vips):
+def assign_ips(num_of_vips=None, hosts=None):
     """
-    Assign IPs to hosts
+    Assign IPs to hosts from IPAM server and return the IPs
+    Takes either num_of_vips or hosts as input. If both are passed, num_of_vips will be considered
+    and hosts will be ignored
+
+    We have to pass similar config while deploying Provider/Client mode cluster
+
+    #   ENV_DATA:
+    #       # MS cluster on custom secondary-2 subnet
+    #       subnet_type: 'secondary_mcidr2'
+    #       machine_cidr: '10.206.16.0/23'
 
     Args:
         num_of_vips (int): Number of IPs to assign
+        hosts (list): List of hosts to assign IPs
 
+    Raises:
+        ValueError: Either hosts or num_of_vips should be passed
     """
     ipam = IPAM(appiapp="address")
     subnet = config.ENV_DATA["machine_cidr"].split("/")[0]
-    hosts = [f"{config.ENV_DATA.get('cluster_name')}-{i}" for i in range(num_of_vips)]
-    ips = ipam.assign_ips(hosts, subnet)
+
+    if num_of_vips:
+        hosts = [
+            f"{config.ENV_DATA.get('cluster_name')}-{i}" for i in range(num_of_vips)
+        ]
+        ips = ipam.assign_ips(hosts, subnet)
+    elif hosts:
+        hosts = [f"{host}" for host in hosts]
+        ips = ipam.assign_ips(hosts, subnet)
+    else:
+        logger.error("Either hosts or num_of_vips should be passed")
+        raise ValueError("Either hosts or num_of_vips should be passed")
+
     logger.debug(f"IPs reserved for hosts {hosts} are {ips}")
     return ips
+
+
+def release_ips(hosts):
+    """
+    Release IPs
+
+    Args:
+        hosts (list): List of hosts to release IPs
+    """
+    if not hosts:
+        logger.info("No hosts to release IPs")
+        return
+    ipam = IPAM(appiapp="address")
+    ipam.release_ips(hosts)
 
 
 def create_dns_records(ips):

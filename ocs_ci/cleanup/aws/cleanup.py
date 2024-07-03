@@ -312,6 +312,23 @@ def cluster_cleanup():
         p.join()
 
 
+def delete_buckets(bucket_prefix, hours):
+    """
+    Delete the S3 buckets with given prefix
+
+    Args:
+        bucket_prefix (dict): Bucket prefix as key and maximum hours to run/exist as value
+        hours (int): hours older than this will be considered to delete
+
+    """
+    aws = AWS()
+    buckets_to_delete = aws.get_buckets_to_delete(bucket_prefix, hours)
+    logger.info(f"buckets to delete: {buckets_to_delete}")
+    for bucket in buckets_to_delete:
+        logger.info(f"Delete bucket {bucket}")
+        aws.delete_bucket(bucket)
+
+
 def aws_cleanup():
     parser = argparse.ArgumentParser(
         description="AWS overall resources cleanup according to running time",
@@ -325,7 +342,10 @@ def aws_cleanup():
         help="""
             Maximum running time of the cluster (in hours).
             Clusters older than this will be deleted.
-            The minimum is 10 hours
+            The minimum is 10 hours.
+            If sweep-buckets flag enabled:
+            Running time for the buckets in hours.
+            Buckets older than to this will be deleted.
             """,
     )
     parser.add_argument(
@@ -365,8 +385,21 @@ def aws_cleanup():
         required=False,
         help="The name of the cluster to delete from AWS",
     )
-
+    bucket_group = parser.add_argument_group("S3 Bucket Sweeping Options")
+    bucket_group.add_argument(
+        "--sweep-buckets", action="store_true", help="Deleting S3 buckets."
+    )
     args = parser.parse_args()
+
+    if args.sweep_buckets:
+        bucket_hours = (
+            args.hours
+            if args.hours is not None
+            else defaults.DEFAULT_BUCKET_RUNNING_TIME
+        )
+        delete_buckets(defaults.BUCKET_PREFIXES_SPECIAL_RULES, bucket_hours)
+        return
+
     if not args.force:
         confirmation = input(
             "Careful! This action could be highly destructive. "

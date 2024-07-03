@@ -184,7 +184,7 @@ class ValidationUI(PageNavigator):
         refresh_web_console_popup = self.wait_until_expected_text_is_found(
             locator=self.validation_loc["warning-alert"],
             expected_text="Refresh web console",
-            timeout=120,
+            timeout=180,
         )
         if refresh_web_console_popup:
             logger.info(
@@ -203,72 +203,64 @@ class ValidationUI(PageNavigator):
         if not, this function will enable it so as to see ODF tab under Storage section
 
         """
-        if (
-            self.ocp_version_semantic >= version.VERSION_4_9
-            and self.ocs_version_semantic >= version.VERSION_4_9
-        ):
-            self.navigate_installed_operators_page()
-            logger.info("Click on project dropdown")
-            self.do_click(self.validation_loc["project-dropdown"])
-            default_projects_is_checked = self.driver.find_element_by_xpath(
-                "//input[@type='checkbox']"
-            )
-            if (
-                default_projects_is_checked.get_attribute("data-checked-state")
-                == "false"
-            ):
-                logger.info("Show default projects")
-                self.do_click(self.validation_loc["show-default-projects"])
-            logger.info("Search for 'openshift-storage' project")
-            self.do_send_keys(
-                self.validation_loc["project-search-bar"], text="openshift-storage"
-            )
-            logger.info("Select 'openshift-storage' project")
-            time.sleep(2)
-            self.do_click(
-                self.dep_loc["choose_openshift-storage_project"], enable_screenshot=True
-            )
-            self.page_has_loaded(retries=25, sleep_time=10)
+
+        self.navigate_installed_operators_page()
+        logger.info("Click on project dropdown")
+        self.do_click(self.validation_loc["project-dropdown"])
+        default_projects_is_checked = self.driver.find_element_by_xpath(
+            "//input[@type='checkbox']"
+        )
+        if default_projects_is_checked.get_attribute("data-checked-state") == "false":
+            logger.info("Show default projects")
+            self.do_click(self.validation_loc["show-default-projects"])
+        logger.info("Search for 'openshift-storage' project")
+        self.do_send_keys(
+            self.validation_loc["project-search-bar"], text="openshift-storage"
+        )
+        logger.info("Select 'openshift-storage' project")
+        time.sleep(2)
+        self.do_click(
+            self.dep_loc["choose_openshift-storage_project"], enable_screenshot=True
+        )
+        self.page_has_loaded(retries=25, sleep_time=1)
+        logger.info(
+            "Check if 'Plugin available' option is available on the Installed Operators page"
+        )
+        plugin_availability_check = self.wait_until_expected_text_is_found(
+            locator=self.dep_loc["plugin-available"],
+            expected_text="Plugin available",
+            timeout=15,
+        )
+        if plugin_availability_check:
             logger.info(
-                "Check if 'Plugin available' option is available on the Installed Operators page"
+                "Storage plugin is disabled, navigate to Operator details page further confirmation"
             )
-            plugin_availability_check = self.wait_until_expected_text_is_found(
-                locator=self.dep_loc["plugin-available"],
-                expected_text="Plugin available",
-                timeout=15,
+            self.do_click(self.validation_loc["odf-operator"])
+            self.page_has_loaded(retries=15, sleep_time=5)
+            console_plugin_status = self.get_element_text(
+                self.validation_loc["console_plugin_option"]
             )
-            if plugin_availability_check:
+            if console_plugin_status == "Disabled":
                 logger.info(
-                    "Storage plugin is disabled, navigate to Operator details page further confirmation"
+                    "Storage plugin is disabled, Enable it to see ODF tab under Storage section"
                 )
-                self.do_click(self.validation_loc["odf-operator"])
-                self.page_has_loaded(retries=15, sleep_time=5)
-                console_plugin_status = self.get_element_text(
-                    self.validation_loc["console_plugin_option"]
+                self.do_click(self.validation_loc["console_plugin_option"])
+                self.do_click(self.dep_loc["enable_console_plugin"])
+                self.do_click(self.validation_loc["save_console_plugin_settings"])
+                logger.info("Waiting for warning alert to refresh the web console")
+                self.refresh_web_console()
+                refresh_web_console_popup = self.wait_until_expected_text_is_found(
+                    locator=self.validation_loc["warning-alert"],
+                    expected_text="Refresh web console",
                 )
-                if console_plugin_status == "Disabled":
+                if refresh_web_console_popup:
                     logger.info(
-                        "Storage plugin is disabled, Enable it to see ODF tab under Storage section"
+                        "Refresh web console option is now available, click on it to see the changes"
                     )
-                    self.do_click(self.validation_loc["console_plugin_option"])
-                    self.do_click(self.dep_loc["enable_console_plugin"])
-                    self.do_click(self.validation_loc["save_console_plugin_settings"])
-                    logger.info("Waiting for warning alert to refresh the web console")
-                    self.refresh_web_console()
-                    refresh_web_console_popup = self.wait_until_expected_text_is_found(
-                        locator=self.validation_loc["warning-alert"],
-                        expected_text="Refresh web console",
+                    self.do_click(
+                        self.validation_loc["refresh-web-console"],
+                        enable_screenshot=True,
                     )
-                    if refresh_web_console_popup:
-                        logger.info(
-                            "Refresh web console option is now available, click on it to see the changes"
-                        )
-                        self.do_click(
-                            self.validation_loc["refresh-web-console"],
-                            enable_screenshot=True,
-                        )
-                else:
-                    logger.info("Console plugin status Enabled")
             else:
                 logger.info("Plugin availability check skipped")
 
@@ -282,28 +274,29 @@ class ValidationUI(PageNavigator):
         1. Validate ODF console plugin is enabled, if not enable it
         2. Navigate to ODF Default first tab
         3. Verify if Overview tab is active
-        4. Verify if Storage System popup works
-        5. Ensure that Block and File status, on Storage System popup is Ready
-        6. Navigate to Storage System details via Storage System popup
-        7. Verify only one Block Pool present on Storage System details page - optional. No BlockPools in External mode
-        8. Navigate Storage System via breadcrumb
-        9. Verify if Overview tab is active
-        10. Verify if System Capacity Card is present
-        11. Navigate to Storage System details via System Capacity Card - optional. Card not presented in External mode
-        12. Verify if Storage System details breadcrumb is present - optional. If step 11 was performed
-        13. Navigate to ODF Overview tab via tab bar - optional. If step 11 was performed
-        14. Verify if Performance Card is present and link works
-        15. Navigate to Storage System details via Performance Card
-        16. Verify if Storage System details breadcrumb is present and link works
-        17. Navigate ODF Backing store tab via Object Storage tab or PageNavigator
-        18. Verify if Backing Store is present and link to Backing Store resource works
-        19. Navigate to Backing Store tab via breadcrumb
-        20. Navigate to Bucket class tab
-        21. Navigate to the default Bucket Class details via Bucket Class tab
-        22. Verify the status of a default Bucket Class
-        23. Navigate to Bucket class via breadcrumb
-        24. Navigate to Namespace Store tab via Bucket Class tab
-        25. Navigate to ODF Overview tab via tab bar
+        4. Ensure used raw capacity string in System Capacity card
+        5. Verify if Storage System popup works
+        6. Ensure that Block and File status, on Storage System popup is Ready
+        7. Navigate to Storage System details via Storage System popup
+        8. Verify only one Block Pool present on Storage System details page - optional. No BlockPools in External mode
+        9. Navigate Storage System via breadcrumb
+        10. Verify if Overview tab is active
+        11. Verify if System Capacity Card is present
+        12. Navigate to Storage System details via System Capacity Card - optional. Card not presented in External mode
+        13. Verify if Storage System details breadcrumb is present - optional. If step 11 was performed
+        14. Navigate to ODF Overview tab via tab bar - optional. If step 11 was performed
+        15. Verify if Performance Card is present and link works
+        16. Navigate to Storage System details via Performance Card
+        17. Verify if Storage System details breadcrumb is present and link works
+        18. Navigate ODF Backing store tab via Object Storage tab or PageNavigator
+        19. Verify if Backing Store is present and link to Backing Store resource works
+        20. Navigate to Backing Store tab via breadcrumb
+        21. Navigate to Bucket class tab
+        22. Navigate to the default Bucket Class details via Bucket Class tab
+        23. Verify the status of a default Bucket Class
+        24. Navigate to Bucket class via breadcrumb
+        25. Navigate to Namespace Store tab via Bucket Class tab
+        26. Navigate to ODF Overview tab via tab bar
         """
         res_dict = {}
 
@@ -317,6 +310,11 @@ class ValidationUI(PageNavigator):
         res_dict[
             "overview_tab_is_active_1"
         ] = odf_overview_tab.validate_overview_tab_active()
+
+        log_step("Ensure used raw capacity string in System Capacity card")
+        res_dict["system_raw_capacity_check_bz_2185042"] = self.check_element_text(
+            "System raw capacity"
+        )
 
         log_step("Verify if Storage System popup works")
         res_dict[
@@ -505,6 +503,8 @@ class ValidationUI(PageNavigator):
         if not (
             config.DEPLOYMENT.get("external_mode")
             or config.ENV_DATA["mcg_only_deployment"]
+            or config.ENV_DATA["platform"].lower()
+            in constants.HCI_PROVIDER_CLIENT_PLATFORMS
         ):
             storage_system_details.nav_cephblockpool_verify_statusready()
 
@@ -564,12 +564,8 @@ class ValidationUI(PageNavigator):
         """
         if self.ocp_version_semantic >= version.VERSION_4_9:
             self.navigate_installed_operators_page()
-            logger.info("Search and select openshift-storage namespace")
-            self.do_click(self.validation_loc["pvc_project_selector"])
-            self.do_send_keys(
-                self.validation_loc["search-project"], text="openshift-storage"
-            )
-            self.wait_for_namespace_selection(project_name="openshift-storage")
+            logger.info("Search and select storage cluster namespace")
+            self.select_namespace(project_name=config.ENV_DATA["cluster_namespace"])
             logger.info(
                 "Click on Storage System under Provided APIs on Installed Operators Page"
             )
@@ -614,8 +610,8 @@ class ValidationUI(PageNavigator):
         """
         Function to verify the unprivileged users can't access ODF dashbaord
         """
-        self.do_click(self.validation_loc["developer_dropdown"])
-        self.do_click(self.validation_loc["select_administrator"], timeout=5)
+
+        self.select_administrator_user()
         try:
             self.nav_odf_default_page()
         except TimeoutException:
@@ -625,18 +621,20 @@ class ValidationUI(PageNavigator):
         else:
             raise UnexpectedODFAccessException
 
-    def verify_odf_without_ocs_in_installed_operator(self) -> bool:
+    def verify_odf_without_ocs_in_installed_operator(self) -> tuple:
         """
         Function to validate ODF operator is present post ODF installation,
         expectation is only ODF operator should be present in Installed operators tab and
         OCS operator shouldn't be present. This function is only written for 4.9+ versions
 
-        Returns:
-        True: If only odf operator is present in the UI
-        False: If ocs operator is also present in the UI
+        Returns: tuple: odf_operator_presence, ocs_operator_presence
+
         """
         logger.info("Navigating to Installed Operator Page")
         self.navigate_installed_operators_page()
+
+        self.select_namespace(project_name=config.ENV_DATA["cluster_namespace"])
+
         logger.info("Searching for Openshift Data Foundation Operator")
         odf_operator_presence = self.wait_until_expected_text_is_found(
             locator=self.validation_loc["odf-operator"],
@@ -649,4 +647,32 @@ class ValidationUI(PageNavigator):
             timeout=1,
             expected_text="OpenShift Container Storage",
         )
-        return odf_operator_presence and not ocs_operator_presence
+        return odf_operator_presence, ocs_operator_presence
+
+    def verify_storage_clients_page(self):
+        """
+        Verify storage clients page in UI
+
+        Returns:
+        StorageClients: Storage Clients page object
+
+        """
+        self.refresh_web_console()
+        storage_client_obj = self.nav_to_storageclients_page()
+        strings_storage_clients_tab = ["Storage clients", "Name"]
+        self.verify_page_contain_strings(
+            strings_on_page=strings_storage_clients_tab, page_name="storage clients"
+        )
+        self.do_click(
+            self.validation_loc["generate_client_onboarding_token_button"],
+            enable_screenshot=True,
+        )
+        strings_object_service_tab = [
+            "Client onboarding token",
+            "How to use this token",
+        ]
+        self.verify_page_contain_strings(
+            strings_on_page=strings_object_service_tab,
+            page_name="client_onboarding_token_page",
+        )
+        return storage_client_obj

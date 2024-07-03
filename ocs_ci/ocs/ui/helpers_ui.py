@@ -44,6 +44,7 @@ def ui_deployment_conditions():
         constants.VSPHERE_PLATFORM,
         constants.AZURE_PLATFORM,
         constants.GCP_PLATFORM,
+        constants.BAREMETAL_PLATFORM,
     ):
         logger.info(f"OCS deployment via UI is not supported on platform {platform}")
         return False
@@ -131,6 +132,7 @@ def ui_add_capacity_conditions():
         "4.13",
         "4.14",
         "4.15",
+        "4.16",
     ):
         logger.info(
             f"Add capacity via UI is not supported when the OCP version [{ocp_version}]"
@@ -198,3 +200,19 @@ def get_element_by_text(text):
 
     """
     return (f"//*[text()= '{text}']", By.XPATH)
+
+
+def is_ui_deployment():
+    """
+    This function checks if the current deployment is UI deployment or not.
+
+    """
+
+    if (
+        (config.RUN["kubeconfig"] is not None)
+        and (config.DEPLOYMENT["ui_deployment"])
+        and (ui_deployment_conditions())
+    ):
+        return True
+
+    return False

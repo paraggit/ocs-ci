@@ -140,6 +140,10 @@ class NotSupportedFunctionError(Exception):
     pass
 
 
+class NotSupportedException(Exception):
+    pass
+
+
 class NonUpgradedImagesFoundError(Exception):
     pass
 
@@ -528,6 +532,10 @@ class ACMClusterDestroyException(Exception):
     pass
 
 
+class ACMClusterConfigurationException(Exception):
+    pass
+
+
 class WrongVersionExpression(ValueError):
     pass
 
@@ -681,4 +689,28 @@ class SameNameClusterAlreadyExistsException(Exception):
 
 
 class NoRunningCephToolBoxException(Exception):
+    pass
+
+
+class UsernameNotFoundException(Exception):
+    pass
+
+
+class MultiStorageClusterExternalCephHealth(Exception):
+    pass
+
+
+class StorageSizeNotReflectedException(Exception):
+    pass
+
+
+class ClusterNotInSTSModeException(Exception):
+    pass
+
+
+class APIRequestError(Exception):
+    pass
+
+
+class ProviderModeNotFoundException(Exception):
     pass

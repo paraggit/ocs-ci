@@ -30,7 +30,10 @@ from ocs_ci.utility.utils import (
     run_cmd,
 )
 from ocs_ci.ocs.ui.acm_ui import AcmPageNavigator
-from ocs_ci.ocs.ui.base_ui import login_ui, SeleniumDriver
+from ocs_ci.ocs.ui.base_ui import (
+    login_ui,
+    SeleniumDriver,
+)
 from ocs_ci.utility.version import compare_versions
 from ocs_ci.utility import version
 from ocs_ci.ocs.exceptions import (
@@ -157,7 +160,7 @@ class AcmAddClusters(AcmPageNavigator):
             if s.MULTICLUSTER["multicluster_index"] != primary_index
         ][0]
         # submariner catalogsource creation
-        if config.ENV_DATA["submariner_release_type"] == "unreleased":
+        if config.ENV_DATA.get("submariner_release_type") == "unreleased":
             submariner_downstream_unreleased = templating.load_yaml(
                 constants.SUBMARINER_DOWNSTREAM_UNRELEASED
             )
@@ -169,11 +172,13 @@ class AcmAddClusters(AcmPageNavigator):
                 ]
             )
 
-            resp = requests.get(submariner_full_url, verify=False)
-            raw_msg = resp.json()["raw_messages"]
-            version_tag = raw_msg[0]["msg"]["pipeline"]["index_image"][
-                f"v{get_ocp_version()}"
-            ].split(":")[1]
+            version_tag = config.ENV_DATA.get("submariner_unreleased_image", None)
+            if version_tag is None:
+                resp = requests.get(submariner_full_url, verify=False)
+                raw_msg = resp.json()["raw_messages"]
+                version_tag = raw_msg[0]["msg"]["pipeline"]["index_image"][
+                    f"v{get_ocp_version()}"
+                ].split(":")[1]
             submariner_downstream_unreleased["spec"]["image"] = ":".join(
                 [constants.SUBMARINER_BREW_REPO, version_tag]
             )
@@ -463,12 +468,13 @@ def verify_running_acm():
     log.info(f"ACM Version Detected: {acm_version}")
 
 
-def validate_cluster_import(cluster_name):
+def validate_cluster_import(cluster_name, switch_ctx=None):
     """
     Validate ACM status of managed cluster
 
     Args:
         cluster_name: (str): cluster name to validate
+        switch_ctx (int): The cluster index by the cluster name
 
     Assert:
         All conditions of selected managed cluster should be "True", Failed otherwise
@@ -476,7 +482,7 @@ def validate_cluster_import(cluster_name):
     Return:
         True, if not AssertionError
     """
-    config.switch_ctx(0)
+    config.switch_ctx(switch_ctx) if switch_ctx else config.switch_ctx(0)
     oc_obj = OCP(kind=ACM_MANAGED_CLUSTERS)
     conditions = oc_obj.exec_oc_cmd(
         f"get managedclusters {cluster_name} -ojsonpath='{{.status.conditions}}'"

@@ -1,13 +1,13 @@
 import os
-import time
 import logging
-
 import boto3
 import pytest
 
-
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
+
+from ocs_ci.utility import version
+from ocs_ci.utility.retry import retry
 from ocs_ci.framework import config
 from ocs_ci.helpers.e2e_helpers import (
     create_muliple_types_provider_obcs,
@@ -27,8 +27,9 @@ from ocs_ci.ocs.bucket_utils import (
     sync_object_directory,
     wait_for_cache,
     write_random_test_objects_to_bucket,
-    s3_list_objects_v1,
     retrieve_verification_mode,
+    s3_list_objects_v2,
+    bulk_s3_put_bucket_lifecycle_config,
 )
 
 from ocs_ci.ocs.benchmark_operator_fio import BenchmarkOperatorFIO
@@ -48,7 +49,9 @@ from ocs_ci.helpers.helpers import (
     validate_pv_delete,
     default_storage_class,
 )
+
 from ocs_ci.utility.kms import is_kms_enabled
+
 from ocs_ci.utility.utils import clone_notify
 
 logger = logging.getLogger(__name__)
@@ -141,17 +144,23 @@ def noobaa_db_backup_and_recovery_locally(
             kind="secret", namespace=config.ENV_DATA["cluster_namespace"]
         )
         secrets = [
-            "noobaa-root-master-key",
             "noobaa-admin",
             "noobaa-operator",
             "noobaa-db",
             "noobaa-server",
             "noobaa-endpoints",
         ]
-        if is_kms_enabled():
-            secrets = [
-                secret for secret in secrets if secret != "noobaa-root-master-key"
-            ]
+
+        if (
+            version.get_semantic_ocs_version_from_config() >= version.VERSION_4_14
+            and not is_kms_enabled()
+        ):
+            secrets.extend(
+                ["noobaa-root-master-key-backend", "noobaa-root-master-key-volume"]
+            )
+        elif not is_kms_enabled():
+            secrets.append("noobaa-root-master-key")
+
         secrets_yaml = [
             ocp_secret_obj.get(resource_name=f"{secret}") for secret in secrets
         ]
@@ -245,15 +254,27 @@ def noobaa_db_backup_and_recovery_locally(
         logger.info("Restarted noobaa-db pod!")
 
         # Make sure the testloss bucket doesn't exists and test bucket consists all the data
-        time.sleep(10)
-        try:
-            s3_list_objects_v1(s3_obj=mcg_obj_session, bucketname=testloss_bucket.name)
-        except Exception as e:
-            logger.info(e)
+        @retry(Exception, tries=10, delay=5)
+        def check_for_buckets_content(bucket):
+            try:
+                response = s3_list_objects_v2(
+                    s3_obj=mcg_obj_session, bucketname=bucket.name
+                )
+                logger.info(response)
+                return response
+            except Exception as err:
+                if "The specified bucket does not exist" in err.args[0]:
+                    return err.args[0]
+                else:
+                    raise
 
-        logger.info(
-            s3_list_objects_v1(s3_obj=mcg_obj_session, bucketname=test_bucket.name)
-        )
+        assert "The specified bucket does not exist" in check_for_buckets_content(
+            testloss_bucket
+        ), "Test loss bucket exists even though it shouldn't be present in the recovered db"
+
+        assert (
+            check_for_buckets_content(test_bucket)["KeyCount"] == 1
+        ), "test bucket doesnt consists of data post db recovery"
 
     def finalizer():
 
@@ -298,31 +319,10 @@ def noobaa_db_backup_and_recovery_locally(
 
 
 @pytest.fixture()
-def noobaa_db_backup_and_recovery(request, snapshot_factory):
-    """
-    Verify noobaa backup and recovery
-
-    1. Take snapshot db-noobaa-db-0 PVC and retore it to PVC
-    2. Scale down the statefulset noobaa-db
-    3. Get the yaml of the current PVC, db-noobaa-db-0 and
-       change the parameter persistentVolumeReclaimPolicy to Retain for restored PVC
-    4. Delete both PVCs, the PV for the original claim db-noobaa-db-0 will be removed.
-       The PV for claim db-noobaa-db-0-snapshot-restore will move to ‘Released’
-    5. Edit again restore PV and remove the claimRef section.
-       The volume will transition to Available.
-    6. Edit the yaml db-noobaa-db-0.yaml and change the setting volumeName to restored PVC.
-    7. Scale up the stateful set again and the pod should be running
-
-    """
+def noobaa_db_backup(request, snapshot_factory):
     restore_pvc_objs = []
 
-    def factory(snapshot_factory=snapshot_factory):
-        # Get noobaa pods before execution
-        noobaa_pods = pod.get_noobaa_pods()
-
-        # Get noobaa PVC before execution
-        noobaa_pvc_obj = pvc.get_pvc_objs(pvc_names=["db-noobaa-db-pg-0"])
-        noobaa_pv_name = noobaa_pvc_obj[0].get("spec").get("spec").get("volumeName")
+    def factory(noobaa_pvc_obj):
 
         # Take snapshot db-noobaa-db-0 PVC
         logger.info(f"Creating snapshot of the {noobaa_pvc_obj[0].name} PVC")
@@ -360,6 +360,15 @@ def noobaa_db_backup_and_recovery(request, snapshot_factory):
             f"Succeesfuly created PVC {restore_pvc_obj.name} "
             f"from snapshot {snap_obj.name}"
         )
+        return restore_pvc_objs, snap_obj
+
+    return factory
+
+
+@pytest.fixture()
+def noobaa_db_recovery_from_backup(request):
+    def factory(snap_obj, noobaa_pvc_obj, noobaa_pods):
+        noobaa_pv_name = noobaa_pvc_obj[0].get("spec").get("spec").get("volumeName")
 
         # Scale down the statefulset noobaa-db
         modify_statefulset_replica_count(
@@ -452,6 +461,41 @@ def noobaa_db_backup_and_recovery(request, snapshot_factory):
         logger.info(
             "Changed the parameter persistentVolumeReclaimPolicy to Delete again"
         )
+
+    return factory
+
+
+@pytest.fixture()
+def noobaa_db_backup_and_recovery(
+    request, snapshot_factory, noobaa_db_backup, noobaa_db_recovery_from_backup
+):
+    """
+    Verify noobaa backup and recovery
+
+    1. Take snapshot db-noobaa-db-0 PVC and retore it to PVC
+    2. Scale down the statefulset noobaa-db
+    3. Get the yaml of the current PVC, db-noobaa-db-0 and
+       change the parameter persistentVolumeReclaimPolicy to Retain for restored PVC
+    4. Delete both PVCs, the PV for the original claim db-noobaa-db-0 will be removed.
+       The PV for claim db-noobaa-db-0-snapshot-restore will move to ‘Released’
+    5. Edit again restore PV and remove the claimRef section.
+       The volume will transition to Available.
+    6. Edit the yaml db-noobaa-db-0.yaml and change the setting volumeName to restored PVC.
+    7. Scale up the stateful set again and the pod should be running
+
+    """
+    restore_pvc_objs = []
+
+    def factory(snapshot_factory=snapshot_factory):
+        global restore_pvc_objs
+        # Get noobaa pods before execution
+        noobaa_pods = pod.get_noobaa_pods()
+
+        # Get noobaa PVC before execution
+        noobaa_pvc_obj = pvc.get_pvc_objs(pvc_names=["db-noobaa-db-pg-0"])
+
+        restore_pvc_objs, snap_obj = noobaa_db_backup(noobaa_pvc_obj)
+        noobaa_db_recovery_from_backup(snap_obj, noobaa_pvc_obj, noobaa_pods)
 
     def finalizer():
         # Get the statefulset replica count
@@ -594,7 +638,12 @@ def setup_mcg_system(
             pattern=cache_pattern,
             mcg_obj=mcg_obj_session,
         )
-        wait_for_cache(mcg_obj_session, cache_bucket.name, objs_written_to_cache_bucket)
+        wait_for_cache(
+            mcg_obj_session,
+            cache_bucket.name,
+            objs_written_to_cache_bucket,
+            timeout=600,
+        )
         # Write a random, larger object directly to the underlying storage of the bucket
         write_random_test_objects_to_bucket(
             awscli_pod_session,
@@ -792,11 +841,13 @@ def setup_mcg_replication_feature_buckets(request, bucket_factory):
                 all_buckets[index].name,
                 "basic-replication-rule-1",
                 all_buckets[index + 1].name,
+                prefix="bidi_1",
             )
             patch_replication_policy_to_bucket(
                 all_buckets[index + 1].name,
                 "basic-replication-rule-2",
                 all_buckets[index].name,
+                prefix="bidi_2",
             )
 
             index += 2
@@ -891,10 +942,8 @@ def setup_mcg_expiration_feature_buckets(
         all_buckets = create_muliple_types_provider_obcs(
             number_of_buckets, type, cloud_providers, bucket_factory
         )
-        for bucket in all_buckets:
-            mcg_obj.s3_client.put_bucket_lifecycle_configuration(
-                Bucket=bucket.name, LifecycleConfiguration=expiration_rule
-            )
+
+        bulk_s3_put_bucket_lifecycle_config(mcg_obj, all_buckets, expiration_rule)
 
         logger.info(
             f"Buckets created under expiration setup: {[bucket.name for bucket in all_buckets]}"
@@ -917,6 +966,7 @@ def setup_rgw_kafka_notification(request, rgw_bucket_factory, rgw_obj):
     notification feature
 
     """
+
     # setup AMQ
     amq = AMQ()
 
@@ -939,6 +989,7 @@ def setup_rgw_kafka_notification(request, rgw_bucket_factory, rgw_obj):
     ) = amq.create_kafkadrop()
 
     def factory():
+
         """
         Factory function implementing the fixture
 
@@ -947,6 +998,7 @@ def setup_rgw_kafka_notification(request, rgw_bucket_factory, rgw_obj):
                 kafka_topic, kafkadrop_host objects etc
 
         """
+
         # get the kafkadrop route
         kafkadrop_host = kafkadrop_route.get().get("spec").get("host")
 
@@ -1279,7 +1331,7 @@ def setup_mcg_bg_features(
                 bucket_name=bucket.name,
                 upload_dir=uploaded_objects_dir + f"Bucket{count}",
                 download_dir=downloaded_obejcts_dir + f"Bucket{count}",
-                amount=object_amount,
+                amount=1,
                 pattern="Random_object",
                 mcg_obj=mcg_obj_session,
                 cleanup=True,

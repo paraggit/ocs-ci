@@ -3,13 +3,15 @@ import logging
 import time
 import boto3
 import random
+import json
 import traceback
 import re
 
+from datetime import datetime, timezone
 from botocore.exceptions import ClientError, NoCredentialsError, WaiterError
 
 from ocs_ci.utility.retry import retry
-from ocs_ci.utility.utils import get_infra_id
+from ocs_ci.utility.utils import exec_cmd, get_infra_id
 from ocs_ci.framework import config
 from ocs_ci.ocs import constants, defaults, exceptions
 from ocs_ci.ocs.parallel import parallel
@@ -39,8 +41,11 @@ class AWS(object):
     _ec2_resource = None
     _region_name = None
     _s3_client = None
+    _s3_resource = None
     _route53_client = None
     _elb_client = None
+    _iam_client = None
+    _sts_client = None
 
     def __init__(self, region_name=None):
         """
@@ -80,16 +85,32 @@ class AWS(object):
         return self._ec2_resource
 
     @property
-    def s3_client(self):
+    def s3_resource(self):
         """
-        Property for s3 client
+        Property for s3 resource
 
         Returns:
             boto3.resource instance of s3
 
         """
+        if not self._s3_resource:
+            self._s3_resource = boto3.resource(
+                "s3",
+                region_name=self._region_name,
+            )
+        return self._s3_resource
+
+    @property
+    def s3_client(self):
+        """
+        Property for s3 client
+
+        Returns:
+            boto3.client instance of s3
+
+        """
         if not self._s3_client:
-            self._s3_client = boto3.resource(
+            self._s3_client = boto3.client(
                 "s3",
                 region_name=self._region_name,
             )
@@ -126,6 +147,36 @@ class AWS(object):
                 region_name=self._region_name,
             )
         return self._elb_client
+
+    @property
+    def iam_client(self):
+        """
+        Property for iam client
+
+        Returns:
+            boto3.client: instance of iam
+        """
+        if not self._iam_client:
+            self._iam_client = boto3.client(
+                "iam",
+                region_name=self._region_name,
+            )
+        return self._iam_client
+
+    @property
+    def sts_client(self):
+        """
+        Property for sts client
+
+        Returns:
+            boto3.client: instance of sts
+        """
+        if not self._sts_client:
+            self._sts_client = boto3.client(
+                "sts",
+                region_name=self._region_name,
+            )
+        return self._sts_client
 
     def get_ec2_instance(self, instance_id):
         """
@@ -972,7 +1023,7 @@ class AWS(object):
             file_path (str): path for the file to be uploaded
 
         """
-        self.s3_client.meta.client.upload_file(
+        self.s3_resource.meta.client.upload_file(
             file_path, bucket_name, object_key, ExtraArgs={"ACL": "public-read"}
         )
 
@@ -985,7 +1036,7 @@ class AWS(object):
             object_key (str): the key for s3 object
 
         """
-        self.s3_client.meta.client.delete_object(Bucket=bucket_name, Key=object_key)
+        self.s3_resource.meta.client.delete_object(Bucket=bucket_name, Key=object_key)
 
     def get_s3_bucket_object_url(self, bucket_name, object_key):
         """
@@ -1870,6 +1921,291 @@ class AWS(object):
                 )
                 instance.wait_until_terminated()
 
+    def list_buckets(self):
+        """
+        List the buckets
+
+        Returns:
+            list: List of dictionaries which contains bucket name and creation date as keys
+               e.g: [
+               {'Name': '214qpg-oidc', 'CreationDate': datetime.datetime(2023, 1, 9, 11, 27, 48, tzinfo=tzutc())},
+               {'Name': '214rmh4-oidc', 'CreationDate': datetime.datetime(2023, 1, 9, 12, 32, 8, tzinfo=tzutc())}
+               ]
+
+        """
+        return self.s3_client.list_buckets()["Buckets"]
+
+    def get_buckets_to_delete(self, bucket_prefix, hours):
+        """
+        Get the bucket with prefix which are older than given hours
+
+        Args:
+            bucket_prefix (str): prefix for the buckets to fetch
+            hours (int): fetch buckets that are older than to the specified number of hours
+
+        """
+        buckets_to_delete = []
+        # Get the current date in UTC
+        current_date = datetime.now(timezone.utc)
+        all_buckets = self.list_buckets()
+        for bucket in all_buckets:
+            bucket_name = bucket["Name"]
+
+            bucket_delete_time = self.get_bucket_time_based_rules(
+                bucket_prefix, bucket_name, hours
+            )
+            # Get the creation date of the bucket in UTC
+            bucket_creation_date = bucket["CreationDate"].replace(tzinfo=timezone.utc)
+
+            # Calculate the age of the bucket
+            age_of_bucket = current_date - bucket_creation_date
+
+            # Check if the bucket is older than given hours
+            if (age_of_bucket.days) * 24 >= bucket_delete_time:
+                logger.info(
+                    f"{bucket_name} (Created on {bucket_creation_date} and age is {age_of_bucket}) can be deleted"
+                )
+                buckets_to_delete.append(bucket_name)
+        return buckets_to_delete
+
+    def get_bucket_time_based_rules(self, bucket_prefixes, bucket_name, hours):
+        """
+        Get the time bucket based prefix and hours
+
+        Args:
+            bucket_prefixes (dict): The rules according to them determine the number of hours the bucket can exist
+            bucket_name (str): bucket name
+            hours (int): The number of hours bucket can exist if there is no compliance with one of the rules
+
+        Returns:
+            int: The number of hours bucket can exist
+
+        """
+        for bucket_prefix in bucket_prefixes:
+            if bool(re.match(bucket_prefix, bucket_name, re.I)):
+                return bucket_prefixes[bucket_prefix]
+        return hours
+
+    def delete_objects_in_bucket(self, bucket):
+        """
+        Delete objects in a bucket
+
+        Args:
+            bucket (str): Name of the bucket to delete objects
+
+        """
+        # List all objects within the bucket
+        response = self.s3_client.list_objects_v2(Bucket=bucket)
+
+        # Delete each object within the bucket
+        if "Contents" in response:
+            for obj in response["Contents"]:
+                object_key = obj["Key"]
+                self.s3_client.delete_object(Bucket=bucket, Key=object_key)
+                logger.info(f"Deleted object: {object_key}")
+        else:
+            logger.info(f"No objects found in bucket {bucket}")
+
+    def delete_bucket(self, bucket):
+        """
+        Delete the bucket
+
+        Args:
+            bucket (str): Name of the bucket to delete
+
+        """
+        logger.info(f"Deleting bucket {bucket}")
+        self.delete_objects_in_bucket(bucket=bucket)
+
+        # Delete the empty bucket
+        self.s3_client.delete_bucket(Bucket=bucket)
+        logger.info(f"Deleted bucket {bucket}")
+
+    def delete_buckets(self, buckets):
+        """
+        Delete the buckets
+
+        Args:
+            buckets (list): List of buckets to delete
+
+        """
+        for each_bucket in buckets:
+            self.delete_bucket(bucket=each_bucket)
+
+    def create_iam_role(self, role_name, description, document):
+        """
+        Create IAM role.
+
+        Args:
+            role_name (str): Name of the role
+            description (str): Description of the role
+            document (str): JSON string representing the role policy to assume
+
+        Returns:
+            dict: Created role data
+
+        """
+        logger.info("Creating IAM role: %s", role_name)
+        return self.iam_client.create_role(
+            RoleName=role_name,
+            Description=description,
+            AssumeRolePolicyDocument=document,
+        )
+
+    def get_iam_roles(self, base_name):
+        """
+        Retrieve a list of IAM roles that start with the base_name.
+
+        Args:
+            base_name (str): Base of the role name
+
+        Returns:
+            list: List of IAM roles that match the base_name
+
+        """
+        logger.info("Retrieving IAM roles that begin with %s", base_name)
+        iam_roles = []
+        paginator = self.iam_client.get_paginator("list_roles")
+        for resp in paginator.paginate():
+            role_names = [
+                role for role in resp["Roles"] if base_name in role.get("RoleName")
+            ]
+            iam_roles.extend(role_names)
+        logger.info(
+            "Found the following roles: %s",
+            [role.get("RoleName") for role in iam_roles],
+        )
+        return iam_roles
+
+    def delete_iam_role(self, role_name):
+        """
+        Delete the specified IAM role.
+
+        Args:
+            role_name (str): Name of the role to delete
+
+        """
+        logger.info("Deleting IAM role: %s", role_name)
+        self.iam_client.delete_role(RoleName=role_name)
+
+    def get_instance_profiles_for_role(self, role_name):
+        """
+        Get instance profiles for the specified role.
+
+        Args:
+            role_name (str): Name of the role to find instance profiles for
+
+        Returns:
+            list: Instance Profiles for the role
+
+        """
+        resp = self.iam_client.list_instance_profiles_for_role(RoleName=role_name)
+        return resp["InstanceProfiles"]
+
+    def remove_role_from_instance_profile(self, role_name, instance_profile_name):
+        """
+        Remove role from instance profile.
+
+        Args:
+            role_name (str): Name of the role to remove from the instance profile
+            instance_profile_name (str): Name of the instance profile to remove the role from
+
+        """
+        logger.info(
+            "Removing role %s from instance profile %s",
+            role_name,
+            instance_profile_name,
+        )
+        self.iam_client.remove_role_from_instance_profile(
+            InstanceProfileName=instance_profile_name, RoleName=role_name
+        )
+
+    def attach_role_policy(self, role_name, policy_arn):
+        """
+        Attach role-policy.
+
+        Args:
+            role_name (str): Name of the role to attach the policy to
+            policy_arn (str): ARN of the policy to attach to the role
+
+        """
+        logger.info("Attaching role-policy %s to role %s", policy_arn, role_name)
+        self.iam_client.attach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
+
+    def get_role_policies(self, role_name):
+        """
+        Get policies embedded in the role.
+
+        Args:
+            role_name (str): Name of the role
+
+        Return:
+            list: Role policies
+
+        """
+        logger.info("Getting policies for the role: %s", role_name)
+        paginator = self.iam_client.get_paginator("list_role_policies")
+        role_policies = []
+        for resp in paginator.paginate(RoleName=role_name):
+            logger.info("Found policies: %s", resp.get("PolicyNames"))
+            role_policies.extend(resp.get("PolicyNames"))
+        return role_policies
+
+    def get_attached_role_policies(self, role_name):
+        """
+        Get policies attached to a role.
+
+        Args:
+            role_name (str): Name of the role to fetch attached policies
+
+        Return:
+            list: Attached role policies
+
+        """
+        logger.info("Getting policies attached to role: %s", role_name)
+        paginator = self.iam_client.get_paginator("list_attached_role_policies")
+        role_policies = []
+        for resp in paginator.paginate(RoleName=role_name):
+            logger.info("Found attached policies: %s", resp.get("AttachedPolicies"))
+            role_policies.extend(resp.get("AttachedPolicies"))
+        return role_policies
+
+    def detach_role_policy(self, role_name, policy_arn):
+        """
+        Detach role policy from IAM role.
+
+        Args:
+            role_name (str): Name of the role to detach the policy from
+            policy_arn (str): ARN for the policy to detach from the role
+
+        """
+        logger.info("Detatching policy %s from role %s", policy_arn, role_name)
+        self.iam_client.detach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
+
+    def delete_role_policy(self, role_name, policy_name):
+        """
+        Delete role policy.
+
+        Args:
+            role_name (str): Name of the role
+            policy_name (str): Name of the policy to delete
+
+        """
+        logger.info("Deleting role %s policy: %s", role_name, policy_name)
+        self.iam_client.delete_role_policy(RoleName=role_name, PolicyName=policy_name)
+
+    def get_caller_identity(self):
+        """
+        Get STS Caller Identity Account ID
+
+        Returns:
+            str: Account ID
+
+        """
+        logger.info("Retrieving STS Caller Identity")
+        resp = self.sts_client.get_caller_identity()
+        return resp["Account"]
+
 
 def get_instances_ids_and_names(instances):
     """
@@ -1908,13 +2244,7 @@ def get_data_volumes(deviceset_pvs):
     aws = AWS()
 
     volume_ids = [
-        "vol-"
-        + pv.get()
-        .get("spec")
-        .get("awsElasticBlockStore")
-        .get("volumeID")
-        .partition("vol-")[-1]
-        for pv in deviceset_pvs
+        pv.get().get("spec").get("csi").get("volumeHandle") for pv in deviceset_pvs
     ]
     return [aws.ec2_resource.Volume(vol_id) for vol_id in volume_ids]
 
@@ -2167,7 +2497,7 @@ def create_and_attach_ebs_volumes(
                     instance_id=worker["id"],
                     name=f"{worker['name']}_extra_volume_{number}",
                     size=size,
-                    device=f"/dev/{device_names[number-1]}",
+                    device=f"/dev/{device_names[number - 1]}",
                 )
 
 
@@ -2201,3 +2531,79 @@ def create_and_attach_volume_for_all_workers(
         count,
         device_names,
     )
+
+
+def create_and_attach_sts_role():
+    """
+    Create IAM role to support STS deployments.
+
+    Returns:
+        dict: Created role data
+
+    """
+    logger.info("Creating STS role in AWS IAM")
+    aws = AWS()
+    namespace = config.ENV_DATA.get("cluster_namespace")
+    service_account_name_1 = "noobaa"
+    service_account_name_2 = "noobaa-endpoint"
+    aws_account_id = aws.get_caller_identity()
+    resp = exec_cmd("oc get authentication cluster -ojson")
+    auth_cluster_dict = json.loads(resp.stdout)
+    oidc_provider = auth_cluster_dict["spec"]["serviceAccountIssuer"].replace(
+        "https://", ""
+    )
+    policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+
+    trust_data = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {
+                    "Federated": f"arn:aws:iam::{aws_account_id}:oidc-provider/{oidc_provider}"
+                },
+                "Action": "sts:AssumeRoleWithWebIdentity",
+                "Condition": {
+                    "StringEquals": {
+                        f"{oidc_provider}:sub": [
+                            f"system:serviceaccount:{namespace}:{service_account_name_1}",
+                            f"system:serviceaccount:{namespace}:{service_account_name_2}",
+                        ]
+                    }
+                },
+            }
+        ],
+    }
+    logger.info("Trust Data: \n%s", trust_data)
+    cluster_path = config.ENV_DATA["cluster_path"]
+    role_name = get_infra_id(cluster_path)
+    description = f"Role created for {role_name} to support STS"
+    role_data = aws.create_iam_role(role_name, description, json.dumps(trust_data))
+    aws.attach_role_policy(role_name, policy_arn)
+    return role_data
+
+
+def delete_sts_iam_roles():
+    """
+    Delete IAM roles for the cluster.
+    """
+    logger.info("Deleting STS IAM Roles")
+    cluster_path = config.ENV_DATA["cluster_path"]
+    infra_id = get_infra_id(cluster_path)
+    aws = AWS()
+    roles = aws.get_iam_roles(infra_id)
+
+    for role in roles:
+        role_name = role["RoleName"]
+        attached_policies = aws.get_attached_role_policies(role_name)
+        for policy in attached_policies:
+            aws.detach_role_policy(role_name, policy["PolicyArn"])
+        policies = aws.get_role_policies(role_name)
+        for policy in policies:
+            aws.delete_role_policy(role_name, policy)
+        instance_profiles = aws.get_instance_profiles_for_role(role_name)
+        for instance_profile in instance_profiles:
+            aws.remove_role_from_instance_profile(
+                role_name, instance_profile["InstanceProfileName"]
+            )
+        aws.delete_iam_role(role_name)

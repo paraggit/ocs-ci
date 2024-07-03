@@ -5,7 +5,6 @@ import os
 import gc
 import time
 import zipfile
-import traceback
 from functools import reduce
 from selenium import webdriver
 from selenium.common.exceptions import (
@@ -28,6 +27,7 @@ from ocs_ci.framework import config
 from ocs_ci.framework import config as ocsci_config
 from ocs_ci.helpers.helpers import get_current_test_name
 from ocs_ci.ocs import constants
+from ocs_ci.ocs.constants import HCI_PROVIDER_CLIENT_PLATFORMS
 from ocs_ci.ocs.exceptions import (
     NotSupportedProxyConfiguration,
 )
@@ -146,6 +146,8 @@ class BaseUI:
             locators, self.ocp_version, "add_capacity"
         )
         self.topology_loc = self.deep_get(locators, self.ocp_version, "topology")
+        self.storage_clients_loc = self.deep_get(locators, self.ocp_version, "storage")
+        self.alerting_loc = self.deep_get(locators, self.ocp_version, "alerting")
 
     def __repr__(self):
         return f"{self.__class__.__name__} Web Page"
@@ -223,6 +225,7 @@ class BaseUI:
             # appears due to JS graphics on the page: one element overlapping another, or dynamic graphics in progress
             logger.info("ElementClickInterceptedException, try click again")
             take_screenshot("ElementClickInterceptedException")
+            self.copy_dom()
             time.sleep(5)
             _do_click(locator, timeout, enable_screenshot, copy_dom)
 
@@ -324,7 +327,7 @@ class BaseUI:
         locator (tuple): (GUI element needs to operate on (str), type (By))
 
         """
-        current_mode = self.is_expanded(locator=locator, timeout=1000)
+        current_mode = self.is_expanded(locator=locator, timeout=180)
         if mode != current_mode:
             self.do_click(locator=locator, enable_screenshot=False)
 
@@ -372,6 +375,23 @@ class BaseUI:
         )
         return len(element_list) > 0
 
+    def check_number_occurrences_text(self, expected_text, number, element="*"):
+        """
+        The number of times the string appears on the web page
+
+        Args:
+            expected_text (string): The expected text.
+            number (int): The number of times the string appears on the web page
+
+        return:
+            bool: True if the text matches the expected text, False otherwise
+
+        """
+        element_list = self.driver.find_elements_by_xpath(
+            f"//{element}[contains(text(), '{expected_text}')]"
+        )
+        return len(element_list) == number
+
     def get_element_text(self, locator):
         """
         Get the inner text of an element in locator.
@@ -407,6 +427,19 @@ class BaseUI:
         """
         wait = WebDriverWait(self.driver, timeout)
         return wait.until(ec.visibility_of_element_located((locator[1], locator[0])))
+
+    def wait_for_element_to_be_present(self, locator, timeout=30):
+        """
+        Wait for element to be present. Use when Web element should be present, but may be placed above another element
+        on the z-layer
+        Method does not fail when Web element not found
+
+        Args:
+             locator (tuple): (GUI element needs to operate on (str), type (By)).
+             timeout (int): Looks for a web element until timeout (sec) occurs
+        """
+        wait = WebDriverWait(self.driver, timeout)
+        return wait.until(ec.presence_of_element_located((locator[1], locator[0])))
 
     def get_element_attribute(self, locator, attribute, safe: bool = False):
         """
@@ -635,6 +668,35 @@ class BaseUI:
         wait = WebDriverWait(self.driver, timeout=timeout)
         wait.until(ec.url_matches(endswith))
 
+    def clear_input_gradually(self, locator):
+        """
+        Clean input field by gradually deleting characters one by one.
+        This way we avoid common automation issue when input field is not cleared.
+
+        Returns:
+            bool: True if the input element is successfully cleared, False otherwise.
+        """
+        wait_for_element_to_be_visible(locator, 30)
+        elements = self.get_elements(locator)
+        input_el = elements[0]
+        input_len = len(str(input_el.get_attribute("value")))
+
+        # timeout in seconds will be equal to a number of symbols to be removed, but not less than 30s
+        timeout = input_len if input_len > 30 else 30
+        timeout = time.time() + timeout
+        if len(elements):
+            while len(str(input_el.get_attribute("value"))) != 0:
+                if time.time() < timeout:
+                    # to remove text from the input independently where the caret is use both delete and backspace
+                    input_el.send_keys(Keys.BACKSPACE, Keys.DELETE)
+                    time.sleep(0.05)
+                else:
+                    raise TimeoutException("time to clear input os out")
+        else:
+            logger.error("test input locator not found")
+            return False
+        return True
+
 
 def screenshot_dom_location(type_loc="screenshot"):
     """
@@ -844,7 +906,7 @@ class SeleniumDriver(WebDriver):
     backoff=2,
     func=garbage_collector_webdriver,
 )
-def login_ui(console_url=None, username=None, password=None):
+def login_ui(console_url=None, username=None, password=None, **kwargs):
     """
     Login to OpenShift Console
 
@@ -876,7 +938,7 @@ def login_ui(console_url=None, username=None, password=None):
     proceed_to_login_console()
 
     try:
-        wait = WebDriverWait(driver, 40)
+        wait = WebDriverWait(driver, 15)
         if username is not None:
             element = wait.until(
                 ec.element_to_be_clickable(
@@ -901,7 +963,9 @@ def login_ui(console_url=None, username=None, password=None):
     except TimeoutException:
         take_screenshot("login")
         copy_dom("login")
-        logger.error(traceback.format_stack())
+        logger.warning(
+            "Login with my_htpasswd_provider or kube:admin text not found, trying to login"
+        )
 
     username_el = wait_for_element_to_be_clickable(login_loc["username"], 60)
     if username is None:
@@ -914,11 +978,36 @@ def login_ui(console_url=None, username=None, password=None):
     confirm_login_el = wait_for_element_to_be_clickable(login_loc["click_login"], 60)
     confirm_login_el.click()
 
-    if default_console is True and username is constants.KUBEADMIN:
-        wait_for_element_to_be_visible(page_nav_loc["page_navigator_sidebar"], 60)
+    hci_platform_conf_confirmed = (
+        config.ENV_DATA["platform"].lower() in HCI_PROVIDER_CLIENT_PLATFORMS
+    )
 
-    if username is not constants.KUBEADMIN:
-        skip_tour_el = wait_for_element_to_be_clickable(login_loc["skip_tour"], 60)
+    if hci_platform_conf_confirmed:
+        dashboard_url = console_url + "/dashboards"
+        # automatically proceed to load-cluster if test marked with provider decorator
+        if (
+            "request" in kwargs
+            and kwargs["request"].node.get_closest_marker("runs_on_provider")
+            and driver.current_url != dashboard_url
+        ):
+            # timeout is unusually high for different scenarios when default page is not loaded immediately
+            navigate_to_local_cluster(
+                acm_page=locators[ocp_version]["acm_page"], timeout=180
+            )
+            logger.info(
+                f"'Local Cluster' page is loaded, current url: {driver.current_url}"
+            )
+        else:
+            NotImplementedError(
+                f"Platform {config.ENV_DATA['platform']} is not supported"
+            )
+
+    if default_console is True and username is constants.KUBEADMIN:
+        wait_for_element_to_be_visible(page_nav_loc["page_navigator_sidebar"], 180)
+
+    if username is not constants.KUBEADMIN and not hci_platform_conf_confirmed:
+        # OCP 4.14 and OCP 4.15 observed default user role is an admin
+        skip_tour_el = wait_for_element_to_be_clickable(login_loc["skip_tour"], 180)
         skip_tour_el.click()
     return driver
 
@@ -961,3 +1050,59 @@ def proceed_to_login_console():
             copy_dom("proceed_to_login_console")
             take_screenshot("proceed_to_login_console")
             raise
+
+
+def navigate_to_local_cluster(**kwargs):
+    """
+    Navigate to Local Cluster page, if not already there
+    :param kwargs: acm_page locators dict, timeout
+
+    :raises TimeoutException: if timeout occurs, and local clusters page is not loaded
+    """
+    if "acm_page" in kwargs:
+        acm_page_loc = kwargs["acm_page"]
+    else:
+        acm_page_loc = locators[get_ocp_version()]["acm_page"]
+    if "timeout" in kwargs:
+        timeout = kwargs["timeout"]
+    else:
+        timeout = 30
+
+    all_clusters_dropdown = acm_page_loc["all-clusters_dropdown"]
+    try:
+        acm_dropdown = wait_for_element_to_be_visible(all_clusters_dropdown, timeout)
+        acm_dropdown.click()
+        local_cluster_item = wait_for_element_to_be_visible(
+            acm_page_loc["local-cluster_dropdown_item"]
+        )
+        local_cluster_item.click()
+    except TimeoutException:
+        wait_for_element_to_be_visible(acm_page_loc["local-cluster_dropdown"])
+
+
+def navigate_to_all_clusters(**kwargs):
+    """
+    Navigate to All Clusters page, if not already there
+    :param kwargs: acm_page locators dict, timeout
+
+    :raises TimeoutException: if timeout occurs, and All clusters acm page is not loaded
+    """
+    if "acm_page" in kwargs:
+        acm_page = kwargs["acm_page"]
+    else:
+        acm_page = locators[get_ocp_version()]["acm_page"]
+    if "timeout" in kwargs:
+        timeout = kwargs["timeout"]
+    else:
+        timeout = 30
+
+    local_clusters_dropdown = acm_page["local-cluster_dropdown"]
+    try:
+        acm_dropdown = wait_for_element_to_be_visible(local_clusters_dropdown, timeout)
+        acm_dropdown.click()
+        all_clusters_item = wait_for_element_to_be_visible(
+            acm_page["all-clusters_dropdown_item"]
+        )
+        all_clusters_item.click()
+    except TimeoutException:
+        wait_for_element_to_be_visible(acm_page["all-clusters_dropdown"])

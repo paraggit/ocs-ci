@@ -28,7 +28,7 @@ from ocs_ci.ocs.exceptions import (
     UnsupportedPlatformError,
     UnsupportedFeatureError,
 )
-from ocs_ci.ocs.cluster import is_managed_service_cluster
+from ocs_ci.ocs.cluster import is_managed_service_cluster, is_hci_cluster
 
 logger = logging.getLogger(__name__)
 
@@ -124,8 +124,12 @@ class FioPodScale(object):
             raise UnexpectedBehaviour("Kube_job batch count should be lesser than 1200")
 
         logger.info(f"Start creating {pvc_count} PVC of 2 types RBD-RWO & FS-RWX")
-        cephfs_sc_obj = constants.DEFAULT_STORAGECLASS_CEPHFS
-        rbd_sc_obj = constants.DEFAULT_STORAGECLASS_RBD
+        if is_hci_cluster():
+            cephfs_sc_obj = constants.DEFAULT_STORAGECLASS_CLIENT_CEPHFS
+            rbd_sc_obj = constants.DEFAULT_STORAGECLASS_CLIENT_RBD
+        else:
+            cephfs_sc_obj = constants.DEFAULT_STORAGECLASS_CEPHFS
+            rbd_sc_obj = constants.DEFAULT_STORAGECLASS_RBD
 
         # Get pvc_dict_list, append all the pvc.yaml dict to pvc_dict_list
         rbd_pvc_dict_list, cephfs_pvc_dict_list = ([], [])
@@ -284,7 +288,9 @@ class FioPodScale(object):
         self.ms_name = list()
 
         # Check for expected worker count
-        if is_managed_service_cluster():
+        if is_hci_cluster():
+            expected_worker_count = config.ENV_DATA["worker_replicas"]
+        elif is_managed_service_cluster():
             expected_worker_count = 3
         else:
             expected_worker_count = get_expected_worker_count(scale_count)
@@ -846,11 +852,15 @@ def check_and_add_enough_worker(worker_count):
                             )
                         )
                 else:
+                    # Getting the machineset configured during deployment of the cluster
+                    existing_ms_in_cluster = machine.get_machinesets()
+                    # Getting default machineset's zone from the cluster
+                    available_zone_in_cluster = existing_ms_in_cluster[0][-1]
                     ms_name.append(
                         machine.create_custom_machineset(
                             instance_type=constants.AWS_PRODUCTION_INSTANCE_TYPE,
                             labels=labels,
-                            zone="a",
+                            zone=available_zone_in_cluster,
                         )
                     )
                 for ms in ms_name:

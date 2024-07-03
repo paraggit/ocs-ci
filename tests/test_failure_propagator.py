@@ -47,7 +47,7 @@ class TestFailurePropagator:
     Test class for failure propagator test case
     """
 
-    @pytest.mark.second_to_last
+    @pytest.mark.order("second_to_last")
     def test_report_skip_triggering_test(self, request):
         """
         This test runs second to last and examines the skipped test cases of the execution.
@@ -108,9 +108,10 @@ class TestFailurePropagator:
                     message = (
                         message + " Couldn't identify the test case that caused this"
                     )
+                config.RUN["display_skipped_msg_in_email"] = message
                 pytest.fail(message)
 
-    @pytest.mark.last
+    @pytest.mark.order("last")
     def test_failure_propagator(self):
         """
         This test intention is to run last and propagate teardown failures caught during the test execution,

@@ -2,6 +2,7 @@
 In this pytest plugin we will keep all our pytest marks used in our tests and
 all related hooks/plugins to markers.
 """
+
 import os
 
 import pytest
@@ -30,10 +31,12 @@ from ocs_ci.ocs.constants import (
     HCI_CLIENT,
     MS_CONSUMER_TYPE,
     HCI_PROVIDER,
+    BAREMETAL_PLATFORMS,
 )
 from ocs_ci.utility import version
 from ocs_ci.utility.aws import update_config_from_s3
 from ocs_ci.utility.utils import load_auth_config
+
 
 # tier marks
 
@@ -105,14 +108,14 @@ tier_marks = [
 # upgrade related markers
 # Requires pytest ordering plugin installed
 # Use only one of those marker on one test case!
-order_pre_upgrade = pytest.mark.run(order=ORDER_BEFORE_UPGRADE)
-order_pre_ocp_upgrade = pytest.mark.run(order=ORDER_BEFORE_OCP_UPGRADE)
-order_pre_ocs_upgrade = pytest.mark.run(order=ORDER_BEFORE_OCS_UPGRADE)
-order_ocp_upgrade = pytest.mark.run(order=ORDER_OCP_UPGRADE)
-order_ocs_upgrade = pytest.mark.run(order=ORDER_OCS_UPGRADE)
-order_post_upgrade = pytest.mark.run(order=ORDER_AFTER_UPGRADE)
-order_post_ocp_upgrade = pytest.mark.run(order=ORDER_AFTER_OCP_UPGRADE)
-order_post_ocs_upgrade = pytest.mark.run(order=ORDER_AFTER_OCS_UPGRADE)
+order_pre_upgrade = pytest.mark.order(ORDER_BEFORE_UPGRADE)
+order_pre_ocp_upgrade = pytest.mark.order(ORDER_BEFORE_OCP_UPGRADE)
+order_pre_ocs_upgrade = pytest.mark.order(ORDER_BEFORE_OCS_UPGRADE)
+order_ocp_upgrade = pytest.mark.order(ORDER_OCP_UPGRADE)
+order_ocs_upgrade = pytest.mark.order(ORDER_OCS_UPGRADE)
+order_post_upgrade = pytest.mark.order(ORDER_AFTER_UPGRADE)
+order_post_ocp_upgrade = pytest.mark.order(ORDER_AFTER_OCP_UPGRADE)
+order_post_ocs_upgrade = pytest.mark.order(ORDER_AFTER_OCS_UPGRADE)
 ocp_upgrade = compose(order_ocp_upgrade, pytest.mark.ocp_upgrade)
 ocs_upgrade = compose(order_ocs_upgrade, pytest.mark.ocs_upgrade)
 pre_upgrade = compose(order_pre_upgrade, pytest.mark.pre_upgrade)
@@ -185,9 +188,19 @@ skipif_mcg_only = pytest.mark.skipif(
     reason="This test cannot run on MCG-Only deployments",
 )
 
+fips_required = pytest.mark.skipif(
+    config.ENV_DATA.get("fips") != "true",
+    reason="Test runs only on FIPS enabled cluster",
+)
+
 stretchcluster_required = pytest.mark.skipif(
-    config.ENV_DATA.get("arbiter_deployment") is not True,
+    config.DEPLOYMENT.get("arbiter_deployment") is False,
     reason="Test runs only on Stretch cluster with arbiter deployments",
+)
+
+sts_deployment_required = pytest.mark.skipif(
+    config.DEPLOYMENT.get("sts_enabled") is False,
+    reason="Test runs only on the AWS STS enabled cluster deployments",
 )
 
 google_api_required = pytest.mark.skipif(
@@ -257,6 +270,11 @@ ipi_deployment_required = pytest.mark.skipif(
 managed_service_required = pytest.mark.skipif(
     (config.ENV_DATA["platform"].lower() not in MANAGED_SERVICE_PLATFORMS),
     reason="Test runs ONLY on OSD or ROSA cluster",
+)
+
+provider_client_platform_required = pytest.mark.skipif(
+    (config.ENV_DATA["platform"].lower() not in HCI_PROVIDER_CLIENT_PLATFORMS),
+    reason="Test runs ONLY on cluster with HCI provider-client platform",
 )
 
 provider_client_ms_platform_required = pytest.mark.skipif(
@@ -375,6 +393,7 @@ skipif_bmpsi = pytest.mark.skipif(
     reason="Test will not run on Baremetal PSI",
 )
 
+
 skipif_managed_service = pytest.mark.skipif(
     config.ENV_DATA["platform"].lower() in MANAGED_SERVICE_PLATFORMS,
     reason="Test will not run on Managed service cluster",
@@ -425,6 +444,13 @@ skipif_hci_provider_and_client = pytest.mark.skipif(
     reason="Test will not run on Fusion HCI provider and Client clusters",
 )
 
+skipif_hci_provider_or_client = pytest.mark.skipif(
+    config.ENV_DATA["platform"].lower() in HCI_PROVIDER_CLIENT_PLATFORMS
+    or config.hci_provider_exist()
+    or config.hci_client_exist(),
+    reason="Test will not run on Fusion HCI provider or Client clusters",
+)
+
 skipif_rosa = pytest.mark.skipif(
     config.ENV_DATA["platform"].lower() == ROSA_PLATFORM,
     reason="Test will not run on ROSA cluster",
@@ -448,6 +474,11 @@ skipif_ibm_power = pytest.mark.skipif(
 skipif_disconnected_cluster = pytest.mark.skipif(
     config.DEPLOYMENT.get("disconnected") is True,
     reason="Test will not run on disconnected clusters",
+)
+
+skipif_stretch_cluster = pytest.mark.skipif(
+    config.DEPLOYMENT.get("arbiter_deployment") is True,
+    reason="Test will not run on stretch cluster",
 )
 
 skipif_proxy_cluster = pytest.mark.skipif(
@@ -495,6 +526,10 @@ skipif_flexy_deployment = pytest.mark.skipif(
     reason="This test doesn't work correctly on OCP cluster deployed via Flexy",
 )
 
+skipif_noobaa_external_pgsql = pytest.mark.skipif(
+    config.ENV_DATA.get("noobaa_external_pgsql") is True,
+    reason="This test will not run correctly in external DB deployed cluster.",
+)
 metrics_for_external_mode_required = pytest.mark.skipif(
     version.get_semantic_ocs_version_from_config() < version.VERSION_4_6
     and config.DEPLOYMENT.get("external_mode") is True,
@@ -555,6 +590,11 @@ skipif_multus_enabled = pytest.mark.skipif(
     reason="This test doesn't work correctly with multus deployments",
 )
 
+skipif_gcp_platform = pytest.mark.skipif(
+    config.ENV_DATA["platform"].lower() == "gcp",
+    reason="Test will not run on GCP deployed cluster",
+)
+
 # Squad marks
 aqua_squad = pytest.mark.aqua_squad
 black_squad = pytest.mark.black_squad
@@ -574,3 +614,41 @@ ignore_owner = pytest.mark.ignore_owner
 
 # Marks to identify the cluster type in which the test case should run
 runs_on_provider = pytest.mark.runs_on_provider
+
+current_test_marks = []
+
+
+def get_current_test_marks():
+    """
+    Get the list of the current active marks
+
+    The current_active_marks global is updated by
+    ocs_ci/tests/conftest.py::update_current_test_marks_global at the start of each test
+
+    """
+    return current_test_marks
+
+
+baremetal_deployment_required = pytest.mark.skipif(
+    (config.ENV_DATA["platform"].lower() not in BAREMETAL_PLATFORMS)
+    or (not vsphere_platform_required),
+    reason="Test required baremetal or vsphere deployment.",
+)
+
+ui_deployment_required = pytest.mark.skipif(
+    not config.DEPLOYMENT.get("ui_deployment"),
+    reason="UI Deployment required to run the test.",
+)
+
+
+# Marks to identify encryption at rest is configured.
+encryption_at_rest_required = pytest.mark.skipif(
+    not config.ENV_DATA.get("encryption_at_rest"),
+    reason="This test requires encryption at rest to be enabled.",
+)
+
+# Mark to identify encryption is configured with KMS.
+skipif_kms_deployment = pytest.mark.skipif(
+    config.DEPLOYMENT.get("kms_deployment") is True,
+    reason="This test is not supported for KMS deployment.",
+)
