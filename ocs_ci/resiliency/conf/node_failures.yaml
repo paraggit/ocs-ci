@@ -1,0 +1,11 @@
+NODE_FAILURES:
+  WAIT_TILL_NODE_JOIN: true
+  FAILURES:
+    - REBOOT_NODE_RANDOMLY:
+        node_selector: 
+          - labels: []
+        num_reboot_nodes: "0-3"
+
+    - NODE_DRAIN:
+        node_selector:
+          - labels: []

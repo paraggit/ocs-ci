@@ -1,0 +1,8 @@
+from ocs_ci.resiliency import run
+
+
+class TestResiliencyScenarios:
+    def test_resiliency_node_failure_scenario(self):
+        """ """
+
+        assert run.run(scenario="NODE_FAILURES")
