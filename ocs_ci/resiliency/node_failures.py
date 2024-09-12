@@ -1,40 +1,27 @@
-from dynaconf import Dynaconf
 import logging
 
 log = logging.getLogger(__name__)
 
 
-class NodeFailureConfig:
-    def __init__(self):
+class NodeFailures:
+    def __init__(self, failure_data):
+        self.failure_data = failure_data
+
+    def failure_case(self):
+        return self.failure_data["NODE_FAILURE"].keys()[0]
+
+    def run(self):
         """ """
-        self.node_failure = Dynaconf(
-            settings_files=["ocs-ci/resiliency/conf/node_failures.yaml"]
-        )
-        self._run_config_validator()
+        if self.failure_case == "REBOOT_NODE_RANDOMLY":
+            self._run_reboot_node()
+        elif self.failure_case == "NODE_DRAIN":
+            self._run_node_drain()
+        else:
+            raise NotImplementedError("Failure method is not Implimented")
 
-    def _run_config_validator(self):
+    def _run_reboot_node(self):
         """ """
-        # self.run_config.validators.register(
-        #     Validator("api_key", must_exist=True),
-        #     Validator("project.version", must_exist=True)
-        # )
+        log.info("Rebooting Node ....")
 
-        self.run_config.Validators.validate()
-
-
-class NodeFailures(NodeFailureConfig):
-    def __init__(self):
-        super().__init__()
-
-    def list_failures(self):
-        """ """
-        pass
-
-    def inject_failures(self):
-        """ """
-
-        pass
-
-    def reboot_node(self, random=True):
-        """ """
-        log.info("Running Node Reboot scenario")
+    def _run_node_drain(self):
+        log.info("Draiing Node .... ")

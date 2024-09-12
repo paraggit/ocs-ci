@@ -1,14 +1,11 @@
-NODE_FAILURES:
+NETWORK_FAILURES:
   WAIT_TILL_NODE_JOIN: true
-  SELECTION: "random"
   FAILURES:
-    - REBOOT_NODE_RANDOMLY:
-        PRIORITY: 0
+    - NODE_NETWORK_DOWN:
         node_selector: 
           - labels: []
         num_reboot_nodes: "0-3"
 
-    - NODE_DRAIN:
-        PRIORITY: 1
+    - POD_NETWORK_FAILURE:
         node_selector:
           - labels: []

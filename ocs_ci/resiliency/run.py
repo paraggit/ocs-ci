@@ -1,12 +1,21 @@
 import logging
-from ocs_ci.resiliency.resiliency_helper import ResiliencyFailures
+from ocs_ci.resiliency.resiliency_helper import Resiliency
 
 log = logging.getLogger(__name__)
 
 
-def run(scenario):
+def run(scenarios):
     """ """
-    conf_obj = ResiliencyFailures(scenario)
-    log.info(f"Resiliency Failures Scenarios {conf_obj}")
+    # Instantiate the Resiliency class with the scenarios
+    resiliency = Resiliency(scenarios)
+
+    # Setup before starting
+    resiliency.setup()
+
+    # Start the failure injection process
+    resiliency.start()
+
+    # Cleanup after completion
+    resiliency.cleanup()
 
     return True
