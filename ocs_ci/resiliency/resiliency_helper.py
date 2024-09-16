@@ -5,6 +5,7 @@ import yaml
 from ocs_ci.ocs import constants
 from ocs_ci.resiliency.node_failures import NodeFailures
 from ocs_ci.resiliency.network_failures import NetworkFailures
+from ocs_ci.helpers.sanity_helpers import Sanity
 
 # Configure the logger
 logging.basicConfig(level=logging.INFO)
@@ -127,6 +128,7 @@ class Resiliency(ResiliencyFailures):
     def __init__(self, scenarios):
         super().__init__(scenarios)
         self.scenarios = scenarios
+        self.sanity_helpers = Sanity()
 
     def setup(self):
         """Setup method before starting the resiliency scenario."""
@@ -135,6 +137,12 @@ class Resiliency(ResiliencyFailures):
     def post_scenario_check(self):
         """ """
         log.info("Checking CEPH HEALTH ...")
+
+        # wait for the CEPH health Check
+        # self.sanity_helpers.health_check(tries=40)
+
+        # # Validate storage pods are running
+        # wait_for_storage_pods()
 
         log.info("Collect or run must gather logs.")
         # raise ValueError("CEPH is not Healthy state.")
@@ -153,6 +161,8 @@ class Resiliency(ResiliencyFailures):
 
     def inject_failure(self, failure):
         """Inject the failure into the system."""
+        fl_obj = InjectFailures(failure)
+        fl_obj.run_failure_case()
 
         log.info(f"Failure {failure} is being processed...")
 
@@ -170,13 +180,13 @@ class InjectFailures:
         self.failure_data = failure
 
     def scenario(self):
-        return self.failure_data.keys()[0]
+        return list(self.failure_data.keys())[0]
 
     def failure_object(self):
 
-        if self.scenario == "NETWORK_FAILURE":
+        if self.scenario() == "NETWORK_FAILURE":
             return NetworkFailures(self.failure_data)
-        elif self.scenario == "NODE_FAILURES":
+        elif self.scenario() == "NODE_FAILURES":
             return NodeFailures(self.failure_data)
         else:
             raise NotImplementedError(
@@ -187,5 +197,3 @@ class InjectFailures:
 
         fl_obj = self.failure_object()
         fl_obj.run()
-
-        pass

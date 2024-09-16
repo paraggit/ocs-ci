@@ -4,6 +4,9 @@ NODE_FAILURES:
   FAILURES:
     - REBOOT_NODE_RANDOMLY:
         PRIORITY: 0
+        NODE_TYPE:
+          - "master"
+          - "worker"
         node_selector: 
           - labels: []
         num_reboot_nodes: "0-3"
