@@ -130,19 +130,19 @@ class Resiliency(ResiliencyFailures):
         self.scenarios = scenarios
         self.sanity_helpers = Sanity()
 
-    def setup(self):
+    def run_workload(self, pvc):
         """Setup method before starting the resiliency scenario."""
         log.info("IN Setup Method")
+
+        # Start Workload Any MEntioned in the config.
+        return True
 
     def post_scenario_check(self):
         """ """
         log.info("Checking CEPH HEALTH ...")
 
         # wait for the CEPH health Check
-        # self.sanity_helpers.health_check(tries=40)
-
-        # # Validate storage pods are running
-        # wait_for_storage_pods()
+        self.sanity_helpers.health_check(tries=40)
 
         log.info("Collect or run must gather logs.")
         # raise ValueError("CEPH is not Healthy state.")
@@ -159,8 +159,12 @@ class Resiliency(ResiliencyFailures):
             self.inject_failure(failure)
             self.post_scenario_check()
 
+        return True
+
     def inject_failure(self, failure):
-        """Inject the failure into the system."""
+        """
+        Inject the failure into the system.
+        """
         fl_obj = InjectFailures(failure)
         fl_obj.run_failure_case()
 
@@ -194,6 +198,8 @@ class InjectFailures:
             )
 
     def run_failure_case(self):
+        """ """
+        log.info("Injecting Failures to the cluster..")
 
         fl_obj = self.failure_object()
         fl_obj.run()
