@@ -165,7 +165,7 @@ class TestSelinuxrelabel(E2ETest):
             # Get the pod conditions
             pod = ocp.OCP(kind="pod", namespace=config.ENV_DATA["cluster_namespace"])
             conditions = pod.exec_oc_cmd(
-                f"get pod {pod_name} -n openshift-storage -o jsonpath='{{.status.conditions}}'"
+                f"get pod {pod_name} -o jsonpath='{{.status.conditions}}'"
             )
             conditions = [
                 {key: None if value == "null" else value for key, value in item.items()}
@@ -315,7 +315,7 @@ class TestSelinuxrelabel(E2ETest):
 
         self.pod_obj = self.get_app_pod_obj()
         ocp.OCP(
-            kind=constants.POD, namespace=constants.OPENSHIFT_STORAGE_NAMESPACE
+            kind=constants.POD, namespace=config.ENV_DATA["cluster_namespace"]
         ).wait_for_resource(
             condition=constants.STATUS_RUNNING,
             resource_name=self.pod_obj.name,

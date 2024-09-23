@@ -2417,7 +2417,7 @@ def wait_for_ceph_health_not_ok(timeout=300, sleep=10):
 
         """
 
-        status = run_ceph_health_cmd(constants.OPENSHIFT_STORAGE_NAMESPACE)
+        status = run_ceph_health_cmd(config.ENV_DATA["cluster_namespace"])
         return str(status).strip() != "HEALTH_OK"
 
     sampler = TimeoutSampler(
@@ -4640,6 +4640,48 @@ def get_pytest_fixture_value(request, fixture_name):
     return request.getfixturevalue(fixture_name)
 
 
+def get_client_type_by_name(cluster_name):
+    """
+    Get the client type by the cluster name
+
+    Args:
+        cluster_name (str): The cluster name
+
+    Returns:
+        str: The client type in lowercase(e.g. kubevirt, agent, non_hosted, etc.,)
+
+    """
+    from ocs_ci.deployment.helpers.hypershift_base import (
+        is_hosted_cluster,
+        get_hosted_cluster_type,
+    )
+
+    if not is_hosted_cluster(cluster_name):
+        return constants.NON_HOSTED_CLUSTER
+
+    return get_hosted_cluster_type(cluster_name)
+
+
+def switch_to_correct_client_type(client_type):
+    """
+    Switch to the correct client type
+
+    Args:
+        client_type (str): The client type(e.g. Kubevirt, Agent, non_hosted, etc.,)
+
+    """
+    client_indices = config.get_consumer_indexes_list()
+    for client_i in client_indices:
+        cluster_name = config.clusters[client_i].ENV_DATA["cluster_name"]
+        if get_client_type_by_name(cluster_name) == client_type:
+            # Switch to the correct client type
+            log.info(f"Switching to the client with the type '{client_type}'")
+            config.switch_ctx(client_i)
+            return
+
+    pytest.skip(f"The client type '{client_type}' does not exist in the run")
+
+
 def switch_to_correct_cluster_at_setup(request):
     """
     Switch to the correct cluster index at setup, according to the 'cluster_type' fixture parameter
@@ -4673,6 +4715,11 @@ def switch_to_correct_cluster_at_setup(request):
     # If the cluster is an MS cluster
     if not config.is_cluster_type_exist(cluster_type):
         pytest.skip(f"The cluster type '{cluster_type}' does not exist in the run")
+
+    client_type = get_pytest_fixture_value(request, "client_type")
+    if cluster_type == constants.HCI_CLIENT and client_type:
+        switch_to_correct_client_type(client_type)
+        return
 
     # Switch to the correct cluster type
     log.info(f"Switching to the cluster with the cluster type '{cluster_type}'")
@@ -4855,7 +4902,7 @@ def get_acm_version(namespace=constants.ACM_HUB_NAMESPACE):
     for csv in csv_list:
         if "advanced-cluster-management" in csv["metadata"]["name"]:
             # extract version string
-            return csv["spec"]["version"]
+            return re.sub(r"-.", "", csv["spec"]["version"])
 
 
 def is_cluster_y_version_upgraded():
@@ -4907,7 +4954,7 @@ def exec_nb_db_query(query):
     nb_db_pod = pod.Pod(
         **pod.get_pods_having_label(
             label=constants.NOOBAA_DB_LABEL_47_AND_ABOVE,
-            namespace=constants.OPENSHIFT_STORAGE_NAMESPACE,
+            namespace=config.ENV_DATA["cluster_namespace"],
         )[0]
     )
 
@@ -4944,7 +4991,7 @@ def get_role_arn_from_sub():
         odf_sub = OCP(
             kind=constants.SUBSCRIPTION,
             resource_name=constants.ODF_SUBSCRIPTION,
-            namespace=constants.OPENSHIFT_STORAGE_NAMESPACE,
+            namespace=config.ENV_DATA["cluster_namespace"],
         )
         for item in odf_sub.get()["spec"]["config"]["env"]:
             if item["name"] == "ROLEARN":

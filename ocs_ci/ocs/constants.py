@@ -35,6 +35,9 @@ TEMPLATE_MULTICLUSTER_DIR = os.path.join(TEMPLATE_DEPLOYMENT_DIR, "multicluster"
 TEMPLATE_DEPLOYMENT_DIR_CNV = os.path.join(TEMPLATE_DIR, "cnv-deployment")
 TEMPLATE_DEPLOYMENT_DIR_METALLB = os.path.join(TEMPLATE_DIR, "metallb-deployment")
 TEMPLATE_DEPLOYMENT_DIR_NMSTATE = os.path.join(TEMPLATE_DIR, "nmstate-deployment")
+TEMPLATE_DEPLOYMENT_DIR_INF = os.path.join(
+    TEMPLATE_DIR, "ingress-node-firewall-deployment"
+)
 TEMPLATE_CEPH_DIR = os.path.join(TEMPLATE_DIR, "ceph")
 TEMPLATE_CSI_DIR = os.path.join(TEMPLATE_DIR, "CSI")
 TEMPLATE_CSI_LVM_DIR = os.path.join(TEMPLATE_CSI_DIR, "lvm")
@@ -123,7 +126,11 @@ STATUS_READYTOUSE = "READYTOUSE"
 STATUS_FAILED = "Failed"
 STATUS_FAILEDOVER = "FailedOver"
 STATUS_RELOCATED = "Relocated"
+STATUS_RELOCATING = "Relocating"
 STATUS_CONTAINER_STATUS_UNKNOWN = "ContainerStatusUnknown"
+STATUS_WAITFORUSERTOCLEANUP = "WaitOnUserToCleanUp"
+STATUS_POWERON = "ON"
+STATUS_POWEROFF = "OFF"
 
 # NooBaa statuses
 BS_AUTH_FAILED = "AUTH_FAILED"
@@ -224,7 +231,10 @@ PROVISIONING = "Provisioning"
 AGENT_SERVICE_CONFIG = "AgentServiceConfig"
 INFRA_ENV = "InfraEnv"
 DEFALUT_DEVICE_CLASS = "ssd"
-
+VM = "vm"
+HOSTED_CLUSTERS = "hostedclusters"
+OPERATOR_KIND = "Operator"
+DRIVER = "Driver"
 
 # Provisioners
 AWS_EFS_PROVISIONER = "openshift.org/aws-efs"
@@ -271,6 +281,7 @@ OPENSHIFT_IMAGE_REGISTRY_DEPLOYMENT = "image-registry"
 OPENSHIFT_IMAGE_SELECTOR = "docker-registry=default"
 OPENSHIFT_INGRESS_NAMESPACE = "openshift-ingress"
 OPENSHIFT_MONITORING_NAMESPACE = "openshift-monitoring"
+CLUSTERS_NAMESPACE = "clusters"
 MASTER_MACHINE = "master"
 WORKER_MACHINE = "worker"
 BOOTSTRAP_MACHINE = "bootstrap"
@@ -293,6 +304,10 @@ NON_MS_CLUSTER_TYPE = "non_ms"
 # HCI cluster types
 HCI_CLIENT = "hci_client"
 HCI_PROVIDER = "provider"
+# hosted cluster types
+HOSTED_CLUSTER_KUBEVIRT = "kubevirt"
+HOSTED_CLUSTER_AGENT = "agent"
+NON_HOSTED_CLUSTER = "non_hosted"
 
 # provider mode constants
 PROVIDER_MODE_OCS_DEPLOYMENT_PATH = os.path.join(
@@ -342,6 +357,43 @@ STORAGE_CLIENT_SUBSCRIPTION_YAML = os.path.join(
 NATIVE_STORAGE_CLIENT_YAML = os.path.join(
     PROVIDER_CLIENT_DEPLOYMENT_DIR, "native_storage_client.yaml"
 )
+
+PROVIDER_CLUSTER_RESOURCE_KINDS = [
+    "cephblockpoolradosnamespaces",
+    "cephblockpoolradosnamespace",
+    "cephblockpools",
+    "cephblockpool",
+    "cephclients",
+    "cephclient",
+    "cephclusters",
+    "cephcluster",
+    "cephfilesystems",
+    "cephfilesystem",
+    "cephfilesystemsubvolumegroups",
+    "cephfilesystemsubvolumegroup",
+    "cephobjectstores",
+    "cephobjectstore",
+    "cephobjectstoreusers",
+    "cephobjectstoreuser",
+    "localvolumediscoveries",
+    "localvolumediscovery",
+    "localvolumediscoveryresults",
+    "localvolumediscoveryresult",
+    "localvolumes",
+    "localvolume",
+    "localvolumesets",
+    "localvolumeset",
+    "storageclusters",
+    "storagecluster",
+    "storageconsumers",
+    "storageconsumer",
+    "storageprofiles",
+    "storageprofile",
+    "storagerequests",
+    "storagerequest",
+    "storagesystems",
+    "storagesystem",
+]
 
 OCS_CLIENT_OPERATOR_CONTROLLER_MANAGER_PREFIX = "ocs-client-operator-controller-manager"
 OCS_CLIENT_OPERATOR_CONSOLE = "ocs-client-operator-console"
@@ -456,7 +508,14 @@ CNV_VM_STOPPED = "Stopped"
 VM_PAUSED = "Paused"
 DEFAULT_CNV_CEPH_RBD_SC = "ocs-storagecluster-ceph-rbd-virtualization"
 VOLUME_IMPORT_SOURCE = "VolumeImportSource"
+VM_VOLUME_PVC = "PVC"
+VM_VOLUME_DV = "DV"
+VM_VOLUME_DVT = "DVT"
 
+# CNV VM source images:
+CNV_FEDORA_SOURCE = "docker://quay.io/containerdisks/fedora:latest"
+CNV_CENTOS_SOURCE = "docker://quay.io/containerdisks/centos-stream:9"
+CNV_RHEL_SOURCE = "docker://registry.redhat.io/rhel9/rhel-guest-image"
 
 # Virtctl constants
 VIRTCTL = "virtctl"
@@ -485,6 +544,7 @@ ACCESS_MODE_RWOP = "ReadWriteOncePod"
 NB_DB_NAME_46_AND_BELOW = "noobaa-db-0"
 NB_DB_NAME_47_AND_ABOVE = "noobaa-db-pg-0"
 REPORT_STATUS_TO_PROVIDER_POD = "report-status-to-provider-"
+ROOK_CEPH_OSD_PREPARE = "rook-ceph-osd-prepare"
 
 # Pod label
 MON_APP_LABEL = "app=rook-ceph-mon"
@@ -520,6 +580,7 @@ CEPH_OBJECT_CONTROLLER_DETECT_VERSION_LABEL = (
     "app=ceph-object-controller-detect-version"
 )
 CSI_ADDONS_CONTROLLER_MANAGER_LABEL = "app.kubernetes.io/name=csi-addons"
+CEPH_CSI_CONTROLLER_MANAGER_LABEL = "control-plane=ceph-csi-op-controller-manager"
 
 DEFAULT_DEVICESET_PVC_NAME = "ocs-deviceset"
 DEFAULT_DEVICESET_LSO_PVC_NAME = "ocs-deviceset-localblock"
@@ -541,12 +602,19 @@ MANAGED_FUSION_ALERTMANAGER_LABEL = "alertmanager=managed-fusion-alertmanager"
 MANAGED_FUSION_AWS_DATA_GATHER = "name=aws-data-gather"
 MANAGED_FUSION_PROMETHEUS_LABEL = "prometheus=managed-fusion-prometheus"
 UX_BACKEND_SERVER_LABEL = "app=ux-backend-server"
+CEPHFS_NODEPLUGIN_LABEL = "app=openshift-storage.cephfs.csi.ceph.com-nodeplugin"
+RBD_NODEPLUGIN_LABEL = "app=openshift-storage.rbd.csi.ceph.com-nodeplugin"
+CEPHFS_CTRLPLUGIN_LABEL = "app=openshift-storage.cephfs.csi.ceph.com-ctrlplugin"
+RBD_CTRLPLUGIN_LABEL = "app=openshift-storage.rbd.csi.ceph.com-ctrlplugin"
 
 # Noobaa Deployments and Statefulsets
 NOOBAA_OPERATOR_DEPLOYMENT = "noobaa-operator"
 NOOBAA_ENDPOINT_DEPLOYMENT = "noobaa-endpoint"
 NOOBAA_DB_STATEFULSET = "noobaa-db-pg"
 NOOBAA_CORE_STATEFULSET = "noobaa-core"
+
+# Noobaa db secret
+NOOBAA_DB_SECRET = "noobaa-db"
 
 # Auth Yaml
 OCSCI_DATA_BUCKET = "ocs-ci-data"
@@ -913,6 +981,7 @@ CNV_VM_STANDALONE_PVC_SOURCE_YAML = os.path.join(
 CNV_VM_STANDALONE_PVC_PVC_YAML = os.path.join(
     TEMPLATE_CNV_VM_STANDALONE_PVC_DIR, "pvc.yaml"
 )
+CNV_VM_STANDALONE_DV_YAML = os.path.join(TEMPLATE_CNV_VM_STANDALONE_PVC_DIR, "dv.yaml")
 CNV_VM_STANDALONE_PVC_VM_YAML = os.path.join(
     TEMPLATE_CNV_VM_STANDALONE_PVC_DIR, "vm.yaml"
 )
@@ -1146,6 +1215,7 @@ RBD_SIDECAR_PATCH_CMD = (
 )
 RBD_SIDECAR_COUNT = 18
 RBD_SIDECAR_COUNT_4_12 = 14
+RBD_SIDECAR_COUNT_4_17 = 16
 DR_S3_SECRET_NAME_PREFIX = "odr-s3secret"
 DR_WORKLOAD_REPO_BASE_DIR = "ocs-workloads"
 DR_RAMEN_CONFIG_MANAGER_KEY = "ramen_manager_config.yaml"
@@ -1155,6 +1225,7 @@ RAMEN_DR_CLUSTER_OPERATOR_APP_LABEL = "app=ramen-dr-cluster"
 RDR_OSD_MODE_GREENFIELD = "greenfield"
 RDR_OSD_MODE_BROWNFIELD = "brownfield"
 RDR_VOLSYNC_CEPHFILESYSTEM_SC = "ocs-storagecluster-cephfs-vrg"
+
 
 # constants
 RBD_INTERFACE = "rbd"
@@ -1225,6 +1296,7 @@ ALERT_STORAGECLIENTHEARTBEATMISSED = "StorageClientHeartbeatMissed"
 ALERT_STORAGECLIENTINCOMPATIBLEOPERATORVERSION = (
     "StorageClientIncompatibleOperatorVersion"
 )
+
 ALERT_CEPH_OSD_VERSION_MISMATCH = "CephOSDVersionMismatch"
 ALERT_PERSISTENT_VOLUME_USAGE_CRITICAL = "PersistentVolumeUsageCritical"
 ALERT_CEPH_CLUSTER_READ_ONLY = "CephClusterReadOnly"
@@ -1246,6 +1318,8 @@ ALERT_CEPH_OSD_NEAR_FULL = "CephOSDNearFull"
 ALERT_PERSISTENT_VOLUME_USAGE_NEAR_FULL = "PersistentVolumeUsageNearFull"
 ALERT_ODF_PERSISTENT_VOLUME_MIRROR_STATUS = "ODFPersistentVolumeMirrorStatus"
 ALERT_OBC_QUOTA_BYTES_ALERT = "ObcQuotaBytesAlert"
+ALERT_MDSCACHEUSAGEHIGH = "MDSCacheUsageHigh"
+ALERT_MDSCPUUSAGEHIGH = "MDSCPUUsageHigh"
 
 # OCS Deployment related constants
 OPERATOR_NODE_LABEL = "cluster.ocs.openshift.io/openshift-storage=''"
@@ -1266,6 +1340,25 @@ OPERATOR_CS_QUAY_API_QUERY = (
 OPTIONAL_OPERATORS_SELECTOR = "catalog=optional-operators"
 OCS_OPERATOR_BUNDLE_IMAGE = "quay.io/rhceph-dev/ocs-operator-bundle"
 OCS_CATALOG_SOURCE_NAME = "ocs-catalogsource"
+
+OCS_DEPLOYMENTS = [
+    "csi-addons-controller-manager",
+    "noobaa-operator",
+    "ocs-operator",
+    "odf-console",
+    "odf-operator-controller-manager",
+    "rook-ceph-operator",
+    "ux-backend-server",
+]
+
+OCS_DEPLOYMENTS_4_16 = OCS_DEPLOYMENTS + [
+    "ocs-client-operator-console",
+    "ocs-client-operator-controller-manager",
+    "prometheus-operator",
+]
+OCS_DEPLOYMENTS_4_17 = OCS_DEPLOYMENTS_4_16 + [
+    "ceph-csi-controller-manager",
+]
 
 # OCP related constants
 OPENSHIFT_UPGRADE_INFO_API = (
@@ -1415,6 +1508,7 @@ CLOUD_PLATFORMS = [
     IBMCLOUD_PLATFORM,
     ROSA_PLATFORM,
     OPENSHIFT_DEDICATED_PLATFORM,
+    ROSA_HCP_PLATFORM,
 ]
 MANAGED_SERVICE_PLATFORMS = [
     OPENSHIFT_DEDICATED_PLATFORM,
@@ -1938,6 +2032,7 @@ DEFAULT_INGRESS_CRT_LOCAL_PATH = f"{DATA_DIR}/mcg-{DEFAULT_INGRESS_CRT}"
 SERVICE_CA_CRT = "service-ca.crt"
 SERVICE_MONITORS = "servicemonitors"
 SERVICE_CA_CRT_AWSCLI_PATH = f"/cert/{SERVICE_CA_CRT}"
+AWSCLI_CA_BUNDLE_PATH = "/tmp/ca-bundle.crt"
 AWSCLI_RELAY_POD_NAME = "awscli-relay-pod"
 JAVAS3_POD_NAME = "java-s3"
 SCALECLI_SERVICE_CA_CM_NAME = "scalecli-service-ca"
@@ -2642,6 +2737,9 @@ GITOPS_MANAGEDCLUSTER_SETBINDING_YAML = os.path.join(
 GITOPS_SUBSCRIPTION_YAML = os.path.join(
     TEMPLATE_DIR, "gitops-deployment", "subscription.yaml"
 )
+GITOPS_OPERATORGROUP_YAML = os.path.join(
+    TEMPLATE_DIR, "gitops-deployment", "gitops_og.yaml"
+)
 OADP_NAMESPACE = "openshift-adp"
 OADP_OPERATOR_NAME = "redhat-oadp-operator"
 OADP_SUBSCRIPTION_YAML = os.path.join(
@@ -2786,6 +2884,7 @@ UI_INPUT_RULES_STORAGE_SYSTEM = {
 
 # DR
 DRPC_PATH = os.path.join(TEMPLATE_DIR, "DR", "drpc.yaml")
+PLACEMENT_PATH = os.path.join(TEMPLATE_DIR, "DR", "placement.yaml")
 CLUSTERROLEBINDING_APPSET_PULLMODEL_PATH = os.path.join(
     TEMPLATE_DIR, "DR", "clusterrolebinding_appset_pullmodel.yaml"
 )
@@ -2801,6 +2900,18 @@ PLACEMENT = "Placement"
 GITOPS_CLUSTER_NAMESPACE = "openshift-gitops"
 APPLICATION_ARGOCD = "applications.argoproj.io"
 PLACEMENT_KIND = "placements.cluster.open-cluster-management.io"
+
+DISCOVERED_APPS = "DiscoveredApps"
+DR_OPS_NAMESAPCE = "openshift-dr-ops"
+DPA_DISCOVERED_APPS_PATH = os.path.join(TEMPLATE_DIR, "DR", "dpa_discovered_apps.yaml")
+
+DISABLE_DR_EACH_APP = os.path.join(TEMPLATE_DIR, "DR", "disable_dr_each_app.sh")
+REMOVE_DR_EACH_MANAGED_CLUSTER = os.path.join(TEMPLATE_DIR, "DR", "dr_conf_removal.sh")
+CLUSTERSELECTORPATH = "/spec/predicates/0/requiredClusterSelector/labelSelector/matchExpressions/0/values/0"
+EXPERIMENTAL_ANNOTATION_PATH = (
+    "/metadata/annotations/"
+    "cluster.open-cluster-management.io~1experimental-scheduling-disable"
+)
 
 # CNV
 VIRTUAL_MACHINE_INSTANCES = "vmi"
@@ -2898,3 +3009,27 @@ NOOBAA_VOLUME_SECRET = "noobaa-root-master-key-volume"
 
 # ascii characters
 ENTER_KEY = chr(13)
+
+# Large size chunk IO
+CHUNK = os.path.join(TEMPLATE_WORKLOAD_DIR, "helper_scripts/chunk.py")
+
+# Ingress Node Firewall related constants
+INGRESS_NODE_FIREWALL_NAMESPACE = "openshift-ingress-node-firewall"
+INGRESS_NODE_FIREWALL_CSV_NAME = "ingress-node-firewall"
+INF_NAMESPACE_YAML = os.path.join(TEMPLATE_DEPLOYMENT_DIR_INF, "namespace.yaml")
+INF_OPERATORGROUP_YAML = os.path.join(TEMPLATE_DEPLOYMENT_DIR_INF, "operatorgroup.yaml")
+INF_SUBSCRIPTION_YAML = os.path.join(TEMPLATE_DEPLOYMENT_DIR_INF, "subscription.yaml")
+INF_CONFIG_YAML = os.path.join(TEMPLATE_DEPLOYMENT_DIR_INF, "config.yaml")
+INF_RULES_YAML = os.path.join(TEMPLATE_DEPLOYMENT_DIR_INF, "rules.yaml")
+
+# helper script to perform meta data operations [create, rename, change permissions...etc] on app pod to fill MDS cache
+METAIO = os.path.join(TEMPLATE_WORKLOAD_DIR, "helper_scripts/meta_data_io.py")
+# helper script to perform file creation IO on app pod to fill MDS cpu
+FILE_CREATOR_IO = os.path.join(
+    TEMPLATE_WORKLOAD_DIR, "helper_scripts/file_creator_io.py"
+)
+
+# workaround: marking disks as ssd
+MC_WORKAROUND_SSD = os.path.join(
+    TEMPLATE_DEPLOYMENT_DIR_OCP, "workaround-ssd-machine-config.yaml"
+)

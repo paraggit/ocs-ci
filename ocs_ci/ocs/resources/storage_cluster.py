@@ -78,7 +78,6 @@ from ocs_ci.utility.rgwutils import get_rgw_count
 from ocs_ci.utility.utils import run_cmd, TimeoutSampler, convert_device_size
 from ocs_ci.utility.decorators import switch_to_orig_index_at_last
 from ocs_ci.helpers.helpers import storagecluster_independent_check
-from ocs_ci.deployment.helpers.mcg_helpers import check_if_mcg_root_secret_public
 
 log = logging.getLogger(__name__)
 
@@ -254,7 +253,7 @@ def ocs_install_verification(
                 constants.MDS_APP_LABEL: 2,
             }
         )
-    elif consumer_cluster or client_cluster:
+    elif client_cluster and (ocs_version < version.VERSION_4_17):
         resources_dict.update(
             {
                 constants.CSI_CEPHFSPLUGIN_LABEL: number_of_worker_nodes,
@@ -303,6 +302,23 @@ def ocs_install_verification(
                 constants.UX_BACKEND_APP_LABEL: 1,
             }
         )
+
+    if ocs_version >= version.VERSION_4_17:
+        resources_dict.update(
+            {
+                constants.CEPH_CSI_CONTROLLER_MANAGER_LABEL: 1,
+            }
+        )
+        # In provider mode, add the new name and label that replaces the provisioner and plugin pods
+        if hci_cluster:
+            resources_dict.update(
+                {
+                    constants.CEPHFS_NODEPLUGIN_LABEL: number_of_worker_nodes,
+                    constants.RBD_NODEPLUGIN_LABEL: number_of_worker_nodes,
+                    constants.CEPHFS_CTRLPLUGIN_LABEL: 2,
+                    constants.RBD_CTRLPLUGIN_LABEL: 2,
+                }
+            )
 
     for label, count in resources_dict.items():
         if label == constants.RGW_APP_LABEL:
@@ -776,26 +792,39 @@ def ocs_install_verification(
     ):
         validate_serviceexport()
 
-    # check that noobaa root secrets are not public
-    if not (client_cluster or managed_service):
-        assert (
-            check_if_mcg_root_secret_public() is False
-        ), "Seems like MCG root secrets are public, please check"
-        log.info("Noobaa root secrets are not public")
-
     # Verify the owner of CSI deployments and daemonsets
-    csi_owner_kind = constants.CONFIGMAP if hci_cluster else constants.DEPLOYMENT
     csi_owner_name = (
         constants.CLIENT_OPERATOR_CONFIGMAP
         if hci_cluster
         else constants.ROOK_CEPH_OPERATOR
     )
+
+    if ocs_version >= version.VERSION_4_17 and hci_cluster:
+        provisioner_deployment_and_owner_names = {
+            f"{constants.CEPHFS_PROVISIONER}-ctrlplugin": constants.CEPHFS_PROVISIONER,
+            f"{constants.RBD_PROVISIONER}-ctrlplugin": constants.RBD_PROVISIONER,
+        }
+        nodeplugin_daemonset_and_owner_names = {
+            f"{constants.CEPHFS_PROVISIONER}-nodeplugin": constants.CEPHFS_PROVISIONER,
+            f"{constants.RBD_PROVISIONER}-nodeplugin": constants.RBD_PROVISIONER,
+        }
+        csi_owner_kind = constants.DRIVER
+    else:
+        provisioner_deployment_and_owner_names = {
+            "csi-cephfsplugin-provisioner": csi_owner_name,
+            "csi-rbdplugin-provisioner": csi_owner_name,
+        }
+        nodeplugin_daemonset_and_owner_names = {
+            "csi-cephfsplugin": csi_owner_name,
+            "csi-rbdplugin": csi_owner_name,
+        }
+        csi_owner_kind = constants.CONFIGMAP if hci_cluster else constants.DEPLOYMENT
     deployment_kind = OCP(kind=constants.DEPLOYMENT, namespace=namespace)
     daemonset_kind = OCP(kind=constants.DAEMONSET, namespace=namespace)
-    for provisioner_name in [
-        "csi-cephfsplugin-provisioner",
-        "csi-rbdplugin-provisioner",
-    ]:
+    for (
+        provisioner_name,
+        csi_owner_name,
+    ) in provisioner_deployment_and_owner_names.items():
         provisioner_deployment = deployment_kind.get(resource_name=provisioner_name)
         owner_references = provisioner_deployment["metadata"].get("ownerReferences")
         assert (
@@ -808,7 +837,7 @@ def ocs_install_verification(
             owner_references[0].get("name") == csi_owner_name
         ), f"Owner reference of {constants.DEPLOYMENT} {provisioner_name} is not {csi_owner_name} {csi_owner_kind}"
     log.info("Verified the ownerReferences CSI provisioner deployments")
-    for plugin_name in ["csi-cephfsplugin", "csi-rbdplugin"]:
+    for plugin_name, csi_owner_name in nodeplugin_daemonset_and_owner_names.items():
         plugin_daemonset = daemonset_kind.get(resource_name=plugin_name)
         owner_references = plugin_daemonset["metadata"].get("ownerReferences")
         assert (

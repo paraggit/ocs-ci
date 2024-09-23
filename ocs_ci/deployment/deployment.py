@@ -29,8 +29,13 @@ from ocs_ci.deployment.helpers.mcg_helpers import (
 )
 from ocs_ci.deployment.helpers.odf_deployment_helpers import get_required_csvs
 from ocs_ci.deployment.acm import Submariner
-from ocs_ci.deployment.helpers.lso_helpers import setup_local_storage
+from ocs_ci.deployment.ingress_node_firewall import restrict_ssh_access_to_nodes
+from ocs_ci.deployment.helpers.lso_helpers import (
+    setup_local_storage,
+    cleanup_nodes_for_lso_install,
+)
 from ocs_ci.deployment.disconnected import prepare_disconnected_ocs_deployment
+from ocs_ci.deployment.encryption import add_in_transit_encryption_to_cluster_data
 from ocs_ci.framework import config, merge_dict
 from ocs_ci.helpers.dr_helpers import (
     configure_drcluster_for_fencing,
@@ -111,6 +116,7 @@ from ocs_ci.ocs.utils import (
 from ocs_ci.utility.deployment import (
     create_external_secret,
     get_and_apply_icsp_from_catalog,
+    workaround_mark_disks_as_ssd,
 )
 from ocs_ci.utility.flexy import load_cluster_info
 from ocs_ci.utility import (
@@ -126,6 +132,7 @@ from ocs_ci.utility.secret import link_all_sa_and_secret_and_delete_pods
 from ocs_ci.utility.ssl_certs import (
     configure_custom_ingress_cert,
     configure_custom_api_cert,
+    get_root_ca_cert,
 )
 from ocs_ci.utility.utils import (
     ceph_health_check,
@@ -247,19 +254,25 @@ class Deployment(object):
         """
         config.switch_ctx(switch_ctx) if switch_ctx else config.switch_acm_ctx()
 
+        logger.info("Creating Namespace for GitOps Operator ")
+        run_cmd(f"oc create namespace {constants.GITOPS_NAMESPACE}")
+
+        logger.info("Creating OperatorGroup for GitOps Operator ")
+        run_cmd(f"oc create -f {constants.GITOPS_OPERATORGROUP_YAML}")
+
         logger.info("Creating GitOps Operator Subscription")
 
         run_cmd(f"oc create -f {constants.GITOPS_SUBSCRIPTION_YAML}")
 
         self.wait_for_subscription(
-            constants.GITOPS_OPERATOR_NAME, namespace=constants.OPENSHIFT_OPERATORS
+            constants.GITOPS_OPERATOR_NAME, namespace=constants.GITOPS_NAMESPACE
         )
         logger.info("Sleeping for 120 seconds after subscribing to GitOps Operator")
         time.sleep(120)
         subscriptions = ocp.OCP(
             kind=constants.SUBSCRIPTION_WITH_ACM,
             resource_name=constants.GITOPS_OPERATOR_NAME,
-            namespace=constants.OPENSHIFT_OPERATORS,
+            namespace=constants.GITOPS_NAMESPACE,
         ).get()
         gitops_csv_name = subscriptions["status"]["currentCSV"]
         csv = CSV(resource_name=gitops_csv_name, namespace=constants.GITOPS_NAMESPACE)
@@ -620,6 +633,9 @@ class Deployment(object):
         """
         self.do_deploy_ocp(log_cli_level)
 
+        if config.ENV_DATA.get("workaround_mark_disks_as_ssd"):
+            workaround_mark_disks_as_ssd()
+
         # TODO: use temporary directory for all temporary files of
         # ocs-deployment, not just here in this particular case
         tmp_path = Path(tempfile.mkdtemp(prefix="ocs-ci-deployment-"))
@@ -673,6 +689,7 @@ class Deployment(object):
             resource_name=self.DEFAULT_STORAGECLASS_LSO
         )
         if perform_lso_standalone_deployment:
+            cleanup_nodes_for_lso_install()
             setup_local_storage(storageclass=self.DEFAULT_STORAGECLASS_LSO)
         self.do_deploy_lvmo()
         self.do_deploy_submariner()
@@ -744,6 +761,14 @@ class Deployment(object):
         )
         if ibmcloud_ipi:
             ibmcloud.label_nodes_region()
+        # configure Ingress Node Firewall and restrict SSH access to nodes
+        if config.ENV_DATA.get("restrict_ssh_access_to_nodes", False):
+            try:
+                restrict_ssh_access_to_nodes()
+            except Exception as err:
+                logger.warning(
+                    f"Ingress Node Firewall deployment and SSH access to nodes restriction failed: {err}"
+                )
 
     def label_and_taint_nodes(self):
         """
@@ -1492,16 +1517,7 @@ class Deployment(object):
             }
 
         # Enable in-transit encryption.
-        if config.ENV_DATA.get("in_transit_encryption"):
-            if "network" not in cluster_data["spec"]:
-                cluster_data["spec"]["network"] = {}
-
-            if "connections" not in cluster_data["spec"]["network"]:
-                cluster_data["spec"]["network"]["connections"] = {}
-
-            cluster_data["spec"]["network"]["connections"] = {
-                "encryption": {"enabled": True}
-            }
+        cluster_data = add_in_transit_encryption_to_cluster_data(cluster_data)
 
         # Use Custom Storageclass Names
         if config.ENV_DATA.get("custom_default_storageclass_names"):
@@ -1585,11 +1601,27 @@ class Deployment(object):
         ceph_threshold_near_full_ratio = config.ENV_DATA.get(
             "ceph_threshold_near_full_ratio"
         )
+
+        osd_maintenance_timeout = config.ENV_DATA.get("osd_maintenance_timeout")
+
+        # For testing: https://issues.redhat.com/browse/RHSTOR-5758
+        skip_upgrade_checks = config.ENV_DATA.get("skip_upgrade_checks")
+        continue_upgrade_after_checks_even_if_not_healthy = config.ENV_DATA.get(
+            "continue_upgrade_after_checks_even_if_not_healthy"
+        )
+        upgrade_osd_requires_healthy_pgs = config.ENV_DATA.get(
+            "upgrade_osd_requires_healthy_pgs"
+        )
+
         set_managed_resources_ceph_cluster = (
             wait_timeout_for_healthy_osd_in_minutes
             or ceph_threshold_backfill_full_ratio
             or ceph_threshold_full_ratio
             or ceph_threshold_near_full_ratio
+            or osd_maintenance_timeout
+            or skip_upgrade_checks is not None
+            or continue_upgrade_after_checks_even_if_not_healthy is not None
+            or upgrade_osd_requires_healthy_pgs is not None
         )
         if set_managed_resources_ceph_cluster:
             cluster_data.setdefault("spec", {}).setdefault(
@@ -1612,6 +1644,26 @@ class Deployment(object):
                 managed_resources_ceph_cluster[
                     "nearFullRatio"
                 ] = ceph_threshold_near_full_ratio
+
+            if osd_maintenance_timeout:
+                managed_resources_ceph_cluster[
+                    "osdMaintenanceTimeout"
+                ] = osd_maintenance_timeout
+
+            if skip_upgrade_checks is not None:
+                managed_resources_ceph_cluster[
+                    "skipUpgradeChecks"
+                ] = skip_upgrade_checks
+
+            if continue_upgrade_after_checks_even_if_not_healthy is not None:
+                managed_resources_ceph_cluster[
+                    "continueUpgradeAfterChecksEvenIfNotHealthy"
+                ] = continue_upgrade_after_checks_even_if_not_healthy
+
+            if upgrade_osd_requires_healthy_pgs is not None:
+                managed_resources_ceph_cluster[
+                    "upgradeOSDRequiresHealthyPGs"
+                ] = upgrade_osd_requires_healthy_pgs
 
         cluster_data_yaml = tempfile.NamedTemporaryFile(
             mode="w+", prefix="cluster_storage", delete=False
@@ -1655,9 +1707,11 @@ class Deployment(object):
         ocs_version = version.get_semantic_ocs_version_from_config()
         disable_noobaa = config.COMPONENTS.get("disable_noobaa", False)
         noobaa_cmd_arg = f"--param ignoreNoobaa={str(disable_noobaa).lower()}"
+        device_size = int(config.ENV_DATA.get("device_size", defaults.DEVICE_SIZE))
+        osd_size_arg = f"--param osdSize={device_size}Gi"
         cmd = (
             f"ibmcloud ks cluster addon enable openshift-data-foundation --cluster {clustername} -f --version "
-            f"{ocs_version}.0 {noobaa_cmd_arg}"
+            f"{ocs_version}.0 {noobaa_cmd_arg} {osd_size_arg}"
         )
         run_ibmcloud_cmd(cmd)
         time.sleep(120)
@@ -1842,6 +1896,23 @@ class Deployment(object):
         cephcluster = CephClusterExternal()
         cephcluster.cluster_health_check(timeout=300)
 
+    def odf_deployments_check(self):
+        """
+        Check on existance of deployments inspired by upstream check:
+        https://github.com/red-hat-storage/odf-operator/blob/main/hack/install-odf.sh#L34-L44
+        """
+        deployments = constants.OCS_DEPLOYMENTS_4_17
+        ocs_version = version.get_semantic_ocs_version_from_config()
+        if ocs_version == version.VERSION_4_16:
+            deployments = constants.OCS_DEPLOYMENTS_4_16
+        if ocs_version < version.VERSION_4_16:
+            deployments = constants.OCS_DEPLOYMENTS
+        deployments_string = " ".join(deployments)
+        exec_cmd(
+            f"oc wait --timeout=5m --for condition=Available -n {self.namespace} "
+            f"deployment {deployments_string}"
+        )
+
     def deploy_ocs(self):
         """
         Handle OCS deployment, since OCS deployment steps are common to any
@@ -1942,6 +2013,7 @@ class Deployment(object):
                         namespace=constants.OPENSHIFT_STORAGE_EXTENDED_NAMESPACE,
                     )
                 )
+        self.odf_deployments_check()
 
         wait_timeout_for_healthy_osd_in_minutes = config.ENV_DATA.get(
             "wait_timeout_for_healthy_osd_in_minutes"
@@ -2677,19 +2749,25 @@ class RBDDRDeployOps(object):
         ocs_version = version.get_ocs_version_from_csv(only_major_minor=True)
         if ocs_version <= version.get_semantic_version("4.11"):
             rbd_sidecar_count = constants.RBD_SIDECAR_COUNT
-        else:
+        elif ocs_version <= version.get_semantic_version("4.16"):
             rbd_sidecar_count = constants.RBD_SIDECAR_COUNT_4_12
+        else:
+            rbd_sidecar_count = constants.RBD_SIDECAR_COUNT_4_17
         while timeout:
             out = run_cmd(rbd_pods)
             logger.info(out)
-            logger.info(len(out.split(" ")))
-            if rbd_sidecar_count != len(out.split(" ")):
+            length_sidecar_container = len(out.split(" "))
+            logger.info(f"sidecar container count: {length_sidecar_container}")
+            if rbd_sidecar_count != length_sidecar_container:
                 time.sleep(2)
             else:
                 break
             timeout -= 1
         if not timeout:
-            raise RBDSideCarContainerException("RBD Sidecar container count mismatch")
+            RBDSideCarContainerException(
+                f"RBD Sidecar container count mismatch. Expected: {rbd_sidecar_count}, "
+                f"Current: {length_sidecar_container}"
+            )
 
     def validate_mirror_peer(self, resource_name):
         """
@@ -2947,9 +3025,6 @@ class MultiClusterDROperatorsDeploy(object):
                 config_map_data["data"].pop(f"{constants.DR_RAMEN_CONFIG_MANAGER_KEY}")
             )
         }
-        ramen_section[constants.DR_RAMEN_CONFIG_MANAGER_KEY][
-            "drClusterOperator"
-        ].update({"deploymentAutomationEnabled": True})
         logger.debug("Merge back the ramen_section with config_map_data")
         config_map_data["data"].update(ramen_section)
         for key in ["annotations", "creationTimestamp", "resourceVersion", "uid"]:
@@ -3003,7 +3078,7 @@ class MultiClusterDROperatorsDeploy(object):
             if (
                 cluster.ENV_DATA["cluster_name"]
                 == get_primary_cluster_config().ENV_DATA["cluster_name"]
-            ):
+            ) or is_recovery_cluster(cluster):
                 continue
             dr_policy_hub_data["spec"]["drClusters"][index] = cluster.ENV_DATA[
                 "cluster_name"
@@ -3286,6 +3361,30 @@ class MultiClusterDROperatorsDeploy(object):
         else:
             raise ResourceWrongStatusException("Compliance status does not match")
 
+    def add_cacert_ramen_configmap(self):
+        """
+        Add CaCert to Ramen hub ConfigMap
+
+        """
+
+        ca_cert_path = get_root_ca_cert()
+        logger.info("Encoding Ca Cert")
+        ca_cert_data_byte = open(ca_cert_path, "r").read().encode("ascii")
+        ca_cert_data_encode = base64.b64encode(ca_cert_data_byte).decode("ascii")
+        dr_ramen_hub_configmap_data = self.meta_obj.get_ramen_resource()
+        ramen_config = yaml.safe_load(
+            dr_ramen_hub_configmap_data.data["data"]["ramen_manager_config.yaml"]
+        )
+        logger.info("Adding Encoded Ca Cert to Ramen Hub configmap")
+        for s3profile in ramen_config["s3StoreProfiles"]:
+            s3profile["caCertificates"] = ca_cert_data_encode
+        dr_ramen_hub_configmap_data_get = dr_ramen_hub_configmap_data.get()
+        dr_ramen_hub_configmap_data_get["data"]["ramen_manager_config.yaml"] = str(
+            ramen_config
+        )
+        logger.info("Applying changes to Ramen Hub configmap")
+        self.update_config_map_commit(dict(dr_ramen_hub_configmap_data_get))
+
     class s3_meta_obj_store:
         """
         Internal class to handle aws s3 metadata obj store
@@ -3372,7 +3471,7 @@ class MultiClusterDROperatorsDeploy(object):
             dr_ramen_hub_configmap_data = ocp.OCP(
                 kind="ConfigMap",
                 resource_name=constants.DR_RAMEN_HUB_OPERATOR_CONFIG,
-                namespace=constants.OPENSHIFT_DR_SYSTEM_NAMESPACE,
+                namespace=constants.OPENSHIFT_OPERATORS,
             )
             dr_ramen_hub_configmap_data.get()
             return dr_ramen_hub_configmap_data
@@ -3463,9 +3562,28 @@ class RDRMultiClusterDROperatorsDeploy(MultiClusterDROperatorsDeploy):
         for i in acm_indexes:
             config.switch_ctx(i)
             self.create_dpa(self.meta_obj.bucket_name)
+
+        config.switch_acm_ctx()
+        # Adding Ca Cert
+        self.add_cacert_ramen_configmap()
         # Only on the active hub enable managedserviceaccount-preview
+        managed_clusters = get_non_acm_cluster_config()
+        for cluster in managed_clusters:
+            index = cluster.MULTICLUSTER["multicluster_index"]
+            config.switch_ctx(index)
+            logger.info("Creating Resource DataProtectionApplication")
+            run_cmd(f"oc create -f {constants.DPA_DISCOVERED_APPS_PATH}")
         config.switch_acm_ctx()
         acm_version = get_acm_version()
+        logger.info("Getting S3 Secret name from Ramen Config")
+        secret_names = self.meta_obj.get_s3_secret_names()
+        for secret_name in secret_names:
+            logger.info(f"Validation Policy for resource v{secret_name}")
+            self.validate_policy_compliance_status(
+                resource_name=f"v{secret_name}",
+                resource_namespace=constants.OPENSHIFT_OPERATORS,
+                compliance_state=constants.ACM_POLICY_COMPLIANT,
+            )
 
         if version.compare_versions(f"{acm_version} >= 2.10"):
             logger.info("Skipping Enabling Managed ServiceAccount")
@@ -3620,14 +3738,34 @@ class MDRMultiClusterDROperatorsDeploy(MultiClusterDROperatorsDeploy):
         for i in acm_indexes:
             config.switch_ctx(i)
             self.create_dpa(self.meta_obj.bucket_name)
-        config.switch_ctx(old_ctx)
+
+        config.switch_acm_ctx()
+        # Adding Ca Cert
+        self.add_cacert_ramen_configmap()
+        # Only on the active hub enable managedserviceaccount-preview
+        managed_clusters = get_non_acm_cluster_config()
+        for cluster in managed_clusters:
+            index = cluster.MULTICLUSTER["multicluster_index"]
+            config.switch_ctx(index)
+            logger.info("Creating Resource DataProtectionApplication")
+            run_cmd(f"oc create -f {constants.DPA_DISCOVERED_APPS_PATH}")
         # Only on the active hub enable managedserviceaccount-preview
         acm_version = get_acm_version()
-
+        config.switch_acm_ctx()
+        logger.info("Getting S3 Secret name from Ramen Config")
+        secret_names = self.meta_obj.get_s3_secret_names()
+        for secret_name in secret_names:
+            logger.info(f"Validation Policy for resource v{secret_name}")
+            self.validate_policy_compliance_status(
+                resource_name=f"v{secret_name}",
+                resource_namespace=constants.OPENSHIFT_OPERATORS,
+                compliance_state=constants.ACM_POLICY_COMPLIANT,
+            )
         if version.compare_versions(f"{acm_version} >= 2.10"):
             logger.info("Skipping Enabling Managed ServiceAccount")
         else:
             self.enable_managed_serviceaccount()
+        config.switch_ctx(old_ctx)
 
     def deploy_multicluster_orchestrator(self):
         super().deploy()

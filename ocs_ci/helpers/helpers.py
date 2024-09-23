@@ -746,6 +746,7 @@ def create_storage_class(
     volume_binding_mode="Immediate",
     allow_volume_expansion=True,
     kernelMountOptions=None,
+    annotations=None,
 ):
     """
     Create a storage class
@@ -769,6 +770,7 @@ def create_storage_class(
             pod attachment.
         allow_volume_expansion(bool): True to create sc with volume expansion
         kernelMountOptions (str): Mount option for security context
+        annotations(dict): dict of annotations to be added to the storageclass.
     Returns:
         OCS: An OCS instance for the storage class
     """
@@ -818,6 +820,9 @@ def create_storage_class(
         sc_data["parameters"][
             f"csi.storage.k8s.io/{key}-secret-namespace"
         ] = config.ENV_DATA["cluster_namespace"]
+
+    if annotations:
+        sc_data["metadata"]["annotations"] = annotations
 
     sc_data["parameters"]["clusterID"] = config.ENV_DATA["cluster_namespace"]
     sc_data["reclaimPolicy"] = reclaim_policy
@@ -2879,7 +2884,7 @@ def modify_deployment_replica_count(
 
 
 def modify_deploymentconfig_replica_count(
-    deploymentconfig_name, replica_count, namespace=config.ENV_DATA["cluster_namespace"]
+    deploymentconfig_name, replica_count, namespace=None
 ):
     """
     Function to modify deploymentconfig replica count,
@@ -2894,6 +2899,7 @@ def modify_deploymentconfig_replica_count(
         bool: True in case if changes are applied. False otherwise
 
     """
+    namespace = namespace or config.ENV_DATA["cluster_namespace"]
     dc_ocp_obj = ocp.OCP(kind=constants.DEPLOYMENTCONFIG, namespace=namespace)
     params = f'{{"spec": {{"replicas": {replica_count}}}}}'
     return dc_ocp_obj.patch(resource_name=deploymentconfig_name, params=params)
@@ -4491,6 +4497,30 @@ def get_s3_credentials_from_secret(secret_name):
     return access_key, secret_key
 
 
+def get_noobaa_db_credentials_from_secret():
+    """
+    Get credentials details i.e., user and password
+    from noobaa-db secret
+
+    Returns:
+        user_name: Username for the db
+        password: Password for the db
+
+    """
+    ocp_secret_obj = OCP(
+        kind=constants.SECRET, namespace=config.ENV_DATA["cluster_namespace"]
+    )
+    nb_db_secret = ocp_secret_obj.get(resource_name=constants.NOOBAA_DB_SECRET)
+
+    base64_user_name = nb_db_secret["data"]["user"]
+    base64_password = nb_db_secret["data"]["password"]
+
+    user_name = base64.b64decode(base64_user_name).decode("utf-8")
+    password = base64.b64decode(base64_password).decode("utf-8")
+
+    return user_name, password
+
+
 def verify_pvc_size(pod_obj, expected_size):
     """
     Verify PVC size is as expected or not.
@@ -4760,7 +4790,7 @@ def flatten_multilevel_dict(d):
     return leaves_list
 
 
-def is_rbd_default_storage_class(custom_sc=None):
+def is_rbd_default_storage_class(sc_name=None):
     """
     Check if RDB is a default storageclass for the cluster
 
@@ -4770,9 +4800,7 @@ def is_rbd_default_storage_class(custom_sc=None):
     Returns:
         bool : True if RBD is set as the  Default storage class for the cluster, False otherwise.
     """
-    default_rbd_sc = (
-        constants.DEFAULT_STORAGECLASS_RBD if custom_sc is None else custom_sc
-    )
+    default_rbd_sc = constants.DEFAULT_STORAGECLASS_RBD if sc_name is None else sc_name
     cmd = (
         f"oc get storageclass {default_rbd_sc} -o=jsonpath='{{.metadata.annotations}}' "
     )
@@ -5121,3 +5149,63 @@ def wait_for_reclaim_space_job(reclaim_space_job):
         raise UnexpectedBehaviour(
             f"ReclaimSpaceJob {reclaim_space_job.name} is not successful. Yaml output: {reclaim_space_job.get()}"
         )
+
+
+def get_rbd_image_info(rbd_pool, rbd_image_name):
+    """
+    Get RBD image information. (e.g provisioned size, used size, image ,   )
+
+    Args:
+        rbd_pool(str) : pool name
+        rbd_image_name(str) : name of rbd image
+
+    Returns:
+        dict :  rbd image information e.g, provisioned size, used size etc.
+    """
+    ct_pod = pod.get_ceph_tools_pod()
+
+    cmd = f"rbd du -p {rbd_pool} {rbd_image_name}"
+
+    cmd_out = ct_pod.exec_ceph_cmd(ceph_cmd=cmd, format="json")
+
+    data = next(
+        (volume for volume in cmd_out["images"] if volume["name"] == rbd_image_name),
+        None,
+    )
+
+    if data:
+        # Conversion constant: 1 GiB = 1024^3 bytes
+        bytes_in_gib = 1024**3
+
+        data["provisioned_size_gib"] = data["provisioned_size"] / bytes_in_gib
+        data["used_size_gib"] = data["used_size"] / bytes_in_gib
+
+    return data
+
+
+def configure_cephcluster_params_in_storagecluster_cr(params, default_values=False):
+    """
+    Configure cephcluster block in StorageCluster CR /spec/managedResources/cephCluster/
+
+    Args:
+        params (list) : A list of dictionaries with value for cephCluster in StorageCluster CR
+        default_values(bool): parameters to set in StorageCluster under /spec/managedResources/cephCluster/
+
+    """
+    logger.info("Configure cephcluster block in StorageCluster CR")
+    storagecluster_obj = ocp.OCP(
+        kind=constants.STORAGECLUSTER,
+        namespace=config.ENV_DATA["cluster_namespace"],
+        resource_name=constants.DEFAULT_CLUSTERNAME,
+    )
+    for parameter in params:
+        sc_key = parameter["sc_key"]
+        if default_values:
+            parameter_value = parameter["default_value"]
+        else:
+            parameter_value = parameter["value"]
+        param = (
+            f'[{{"op": "add", "path": "/spec/managedResources/cephCluster/{sc_key}",'
+            f' "value": {parameter_value}}}]'
+        )
+        storagecluster_obj.patch(params=param, format_type="json")

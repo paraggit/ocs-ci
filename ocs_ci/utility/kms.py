@@ -117,6 +117,7 @@ class Vault(KMS):
         self.vault_namespace = None
         self.vault_deploy_mode = config.ENV_DATA.get("vault_deploy_mode")
         self.vault_backend_path = None
+        self.csi_vault_backend_path = None
         self.vault_backend_version = config.ENV_DATA.get(
             "VAULT_BACKEND", defaults.VAULT_DEFAULT_BACKEND_VERSION
         )
@@ -328,6 +329,7 @@ class Vault(KMS):
             config.ENV_DATA, "VAULT_CACERT", defaults.VAULT_DEFAULT_CA_CERT
         )
         ca_data["metadata"]["name"] = self.ca_cert_name
+        ca_data["metadata"]["namespace"] = config.ENV_DATA["cluster_namespace"]
         ca_data["data"]["cert"] = self.ca_cert_base64
         self.create_resource(ca_data, prefix="ca")
 
@@ -343,12 +345,18 @@ class Vault(KMS):
                 constants.EXTERNAL_VAULT_CLIENT_CERT
             )
             client_cert_data["metadata"]["name"] = self.client_cert_name
+            client_cert_data["metadata"]["namespace"] = config.ENV_DATA[
+                "cluster_namespace"
+            ]
             client_cert_data["data"]["cert"] = self.client_cert_base64
             self.create_resource(client_cert_data, prefix="clientcert")
 
             # create client key secert
             client_key_data = templating.load_yaml(constants.EXTERNAL_VAULT_CLIENT_KEY)
             client_key_data["metadata"]["name"] = self.client_key_name
+            client_key_data["metadata"]["namespace"] = config.ENV_DATA[
+                "cluster_namespace"
+            ]
             client_key_data["data"]["key"] = self.client_key_base64
             self.create_resource(client_key_data, prefix="clientkey")
 
@@ -456,7 +464,7 @@ class Vault(KMS):
         if self.vault_sealed():
             logger.info("Vault is sealed, Unsealing now..")
             for i in range(3):
-                kkey = f"UNSEAL_KEY{i+1}"
+                kkey = f"UNSEAL_KEY{i + 1}"
                 self._vault_unseal(self.vault_conf[kkey])
             # Check if vault is unsealed or not
             if self.vault_sealed():
@@ -605,22 +613,46 @@ class Vault(KMS):
                 vault_conf = load_auth_config()["vault"]
             return vault_conf
 
-    def get_vault_connection_info(self, resource_name=None):
+    def get_vault_connection_info(
+        self,
+        resource_name=None,
+        resource_configmap=constants.VAULT_KMS_CONNECTION_DETAILS_RESOURCE,
+    ):
         """
-        Get resource info from ocs-kms-connection-defatils
+        Get resource info from ocs-kms-connection-details or csi-kms-connection-details
+        ConfigMap.
 
         Args:
             resource_name (str): name of the resource
 
+        Returns:
+            str or None: The resource information, or None if not found.
         """
-        connection_details = ocp.OCP(
+        cm_obj = ocp.OCP(
             kind="ConfigMap",
-            resource_name=constants.VAULT_KMS_CONNECTION_DETAILS_RESOURCE,
             namespace=config.ENV_DATA["cluster_namespace"],
         )
-        return connection_details.get().get("data")[resource_name]
 
-    def get_vault_backend_path(self):
+        if not cm_obj.is_exist(resource_configmap):
+            logger.info(f"Resource ConfigMap {resource_configmap} does not exist")
+            return None
+
+        cm_data = cm_obj.get(resource_configmap).get("data", {})
+
+        if resource_configmap == constants.VAULT_KMS_CONNECTION_DETAILS_RESOURCE:
+            return cm_data.get(resource_name)
+
+        if resource_configmap == constants.VAULT_KMS_CSI_CONNECTION_DETAILS:
+            for v in cm_data.values():
+                json_out = json.loads(v)
+                if json_out.get("KMS_SERVICE_NAME") == "vault":
+                    return json_out.get(resource_name)
+
+        return None
+
+    def get_vault_backend_path(
+        self, resource_configmap=constants.VAULT_KMS_CONNECTION_DETAILS_RESOURCE
+    ):
         """
         Fetch the vault backend path used for this deployment
         This can be obtained from kubernetes secret resource
@@ -636,11 +668,23 @@ class Vault(KMS):
               VAULT_BACKEND_PATH: ocs
 
         """
-        if not self.vault_backend_path:
-            self.vault_backend_path = self.get_vault_connection_info(
-                "VAULT_BACKEND_PATH"
-            )
-            logger.info(f"setting vault_backend_path = {self.vault_backend_path}")
+        if resource_configmap == constants.VAULT_KMS_CONNECTION_DETAILS_RESOURCE:
+            if not self.vault_backend_path:
+                self.vault_backend_path = self.get_vault_connection_info(
+                    resource_name="VAULT_BACKEND_PATH",
+                    resource_configmap=resource_configmap,
+                )
+                logger.info(f"setting vault_backend_path = {self.vault_backend_path}")
+
+        elif resource_configmap == constants.VAULT_KMS_CSI_CONNECTION_DETAILS:
+            if not self.csi_vault_backend_path:
+                self.csi_vault_backend_path = self.get_vault_connection_info(
+                    resource_name="VAULT_BACKEND_PATH",
+                    resource_configmap=resource_configmap,
+                )
+                logger.info(f"setting vault_backend_path = {self.vault_backend_path}")
+        else:
+            logger.error(f"Wrong resource_configmap : {resource_configmap}.")
 
     def get_vault_path_token(self):
         """
@@ -1206,6 +1250,48 @@ class Vault(KMS):
         if "Success" in out.decode():
             logger.info(f"Role {role_name} created successfully")
 
+    def get_pv_secret(self, device_handle):
+        """
+        Get secret stored in the vault KMS for the given device_handle
+
+        Args:
+            device_handle (str): PV device handle string
+
+        Returns:
+            secret (str): passphrase stored in the vault KMS for given device handle.
+        """
+        if not self.csi_vault_backend_path:
+            self.get_vault_backend_path(
+                resource_configmap=constants.VAULT_KMS_CSI_CONNECTION_DETAILS
+            )
+
+        cmd = f"vault kv get -format=json {self.csi_vault_backend_path}/{device_handle}"
+        out = subprocess.check_output(shlex.split(cmd))
+        json_out = json.loads(out)
+
+        def find_passphrase(obj):
+            """
+            Recursively searches for the 'passphrase' key in the JSON object.
+            """
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    if key == "passphrase":
+                        return value
+                    elif isinstance(value, dict) or isinstance(value, list):
+                        result = find_passphrase(value)
+                        if result:
+                            return result
+            elif isinstance(obj, list):
+                for item in obj:
+                    result = find_passphrase(item)
+                    if result:
+                        return result
+            return None
+
+        secret = find_passphrase(json_out)
+
+        return secret
+
 
 class HPCS(KMS):
     """
@@ -1561,6 +1647,7 @@ class KMIP(KMS):
         kmip_kms_secret["metadata"]["name"] = helpers.create_unique_resource_name(
             "thales-kmip", type
         )
+        kmip_kms_secret["metadata"]["namespace"] = config.ENV_DATA["cluster_namespace"]
         self.create_resource(kmip_kms_secret, prefix="thales-kmip-secret")
         logger.info(f"KMIP secret {kmip_kms_secret['metadata']['name']} created")
         return kmip_kms_secret["metadata"]["name"]
