@@ -2,16 +2,23 @@ NODE_FAILURES:
   WAIT_TILL_NODE_JOIN: true
   SELECTION: "random"
   FAILURES:
-    - REBOOT_NODE_RANDOMLY:
-        PRIORITY: 0
-        NODE_TYPE:
-          - "master"
-          - "worker"
-        node_selector: 
-          - labels: []
-        num_reboot_nodes: "0-3"
-
-    - NODE_DRAIN:
-        PRIORITY: 1
-        node_selector:
-          - labels: []
+  - REBOOT_NODE_RANDOMLY:
+      PRIORITY: 0
+      NODE_TYPE:
+        - "master"
+        - "worker"
+      node_selector: 
+        - labels: []
+      num_reboot_nodes: "0-3"
+  - NODE_DRAIN:
+      PRIORITY: 1
+      node_selector:
+        - labels: []
+  WORKLOAD:
+    FIO:
+      - CEPHFS:
+        template: "fio_cephfs_template.yaml"
+        name: "cephfs-fio-workload"
+      - BLOCK:
+        template: "fio_block_template.yaml"
+        name: "block-fio-workload"

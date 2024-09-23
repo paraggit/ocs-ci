@@ -49,16 +49,21 @@ class FioWorkload(Workload):
     FIO-specific implementation of Workload
     """
 
-    def __init__(self, workload_data):
+    def __init__(self, pvc):
         super().__init__()
+        self.pvc_obj = pvc
         self.template_file = "fio_workload_template.yaml"
         self.template = self.workload_env.get_template(self.template_file)
-        self.output_file = f"/tmp/{fauxfactory.gen_alpha(8)}.yaml"
-        self.render_template(workload_data)
+        self.deployment_name = f"fio-app-{fauxfactory.gen_alpha(8).lower()}"
+        self.output_file = f"/tmp/{fauxfactory.gen_alpha(8).lower()}.yaml"
+        self.render_template()
 
     def start_workload(self):
         log.info("Starting FIO workload")
         run_cmd(f"oc create -f {self.output_file}")
+        import time
+
+        time.sleep(5)
         log.info("Started FIO Workload")
 
         # Implement pod creation logic here using the self.image and v1 API
@@ -81,16 +86,14 @@ class FioWorkload(Workload):
         log.info("Cleaning up FIO workload")
         # Implement cleanup logic, e.g., deleting all pods in the workload
 
-    def render_template(self, workload_data):
-        self.fio_name = workload_data["name"]
-        self.namespace = workload_data["namespace"]
-        self.file_name = workload_data["file_name"]
-        self.pvc_name = workload_data["pvc_name"]
-        self.replicas = workload_data["replicas"]
+    def render_template(self):
+        self.fio_name = self.deployment_name
+        self.namespace = self.pvc_obj.namespace
+        self.file_name = f"fio-file-{fauxfactory.gen_alpha(8).lower()}"
+        self.pvc_name = self.pvc_obj.name
 
         rendered_yaml = self.template.render(
             fio_name=self.fio_name,
-            replicas=self.replicas,
             namespace=self.namespace,
             fio_file_name=self.file_name,
             pvc_claim_name=self.pvc_name,
@@ -160,14 +163,31 @@ class VdbenchWorkload(Workload):
         # Implement cleanup logic
 
 
-def workload_object(workload, workload_data, namespace=None):
-    """ """
-    if workload == "FIO":
-        return FioWorkload(workload_data)
-    elif workload == "SMALLFILES":
-        return SmallFilesWorkload(namespace)
-    elif workload == "VDBENCH":
-        return VdbenchWorkload(namespace)
+# def workload_object(workload, workload_data, namespace=None):
+#     """ """
+#     if workload == "FIO":
+#         return FioWorkload(pvc, workload_data)
+#     elif workload == "SMALLFILES":
+#         return SmallFilesWorkload(namespace)
+#     elif workload == "VDBENCH":
+#         return VdbenchWorkload(namespace)
+#     else:
+#         raise NotImplementedError(f"Workload Method: {workload} Not implimented")
+
+
+# class RunWorkload:
+#     def __init__(self, workload_data):
+#         """
+#         """
+#         self.workload_data = workload_data
+#         self.workload_obj = []
+
+#     def run_workload(self):
+#         for workload in self.workload_data:
+#             for load in self.workload_data[workload]:
+#                 try:
+#                     work_obj = workload_object(workload, load)
+#                     self.append()
 
 
 # # Example usage

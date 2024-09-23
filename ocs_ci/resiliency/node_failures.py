@@ -7,6 +7,7 @@ from ocs_ci.utility.vsphere import VSPHERE
 from ocs_ci.ocs import constants
 from pyVmomi import vim
 import random
+import time
 
 
 log = logging.getLogger(__name__)
@@ -44,27 +45,64 @@ class VsphereClusterFailures(ClusterFailures):
         print(f"Shutting down node {node_ip} on vSphere cluster {self.cluster_name}")
 
     def reboot_node(self, node_ip):
-        """ """
+        """Reboots the VM and waits until it is fully operational."""
         vm = self.vsobj.get_vm_by_ip(node_ip, self.dc)
+        vm_name = vm.name  # Store the VM name for logging
 
         try:
             if vm.runtime.powerState == vim.VirtualMachinePowerState.poweredOn:
-                log.info(f"Rebooting VM : {vm.name}")
+                log.info(f"Rebooting VM: {vm_name}")
                 vm.RebootGuest()
             else:
                 log.info(
-                    f"VM {vm.name} is not powered on. Power state: {vm.runtime.powerState}"
+                    f"VM {vm_name} is not powered on. Power state: {vm.runtime.powerState}"
                 )
                 return False
         except vim.fault.ToolsUnavailable:
             log.info(
-                "VMware Tools are not installed or running. Rebooting the VM by power cycling."
+                f"VMware Tools are not available on {vm_name}. Performing a hard reset."
             )
-            vm.ResetVM_Task()  # Force a reboot if VMware Tools are unavailable
+            reset_task = vm.ResetVM_Task()
+            self.vsobj.wait_for_tasks([reset_task])
         except Exception as e:
-            log.info(f"Error rebooting the VM: {e}")
+            log.error(f"Error rebooting the VM {vm_name}: {e}")
             return False
-        return self.vsobj.wait_for_vm_status(vm, vim.VirtualMachinePowerState.poweredOn)
+
+        # Wait for the VM to power on and VMware Tools to be running
+        max_wait_time = 300  # seconds
+        wait_interval = 5  # seconds
+        elapsed_time = 0
+
+        while elapsed_time < max_wait_time:
+            time.sleep(wait_interval)
+            elapsed_time += wait_interval
+
+            try:
+                # Re-fetch the VM object to get updated properties
+                vm = self.vsobj.get_vm_by_ip(node_ip, self.dc)
+
+                power_state = vm.runtime.powerState
+                tools_status = vm.guest.toolsRunningStatus
+
+                if (
+                    power_state == vim.VirtualMachinePowerState.poweredOn
+                    and tools_status == "guestToolsRunning"
+                ):
+                    log.info(f"VM {vm_name} has rebooted and VMware Tools are running.")
+                    return True
+                else:
+                    log.info(
+                        f"Waiting for VM {vm_name} to reboot. "
+                        f"Power state: {power_state}, VMware Tools status: {tools_status}"
+                    )
+            except Exception as e:
+                log.error(f"Error retrieving VM {vm_name} status: {e}")
+                return False
+
+        log.error(
+            f"Timeout waiting for VM {vm_name} to reboot after {max_wait_time} seconds."
+        )
+        return False
 
     def bring_down_network_interface(self, node_name, interface_name):
         print(
@@ -157,19 +195,24 @@ def get_cluster_object():
 
 
 class NodeFailures:
-    def __init__(self, failure_data):
+    def __init__(self, scenario_name, failure_data):
         self.failure_data = failure_data
-        self.scenario_name = "NODE_FAILURES"
+        self.failure_case_name = self._get_failure_case()
+        self.scenario_name = scenario_name
         self.cluster_obj = get_cluster_object()
 
-    def failure_case(self):
-        return list(self.failure_data[self.scenario_name].keys())[0]
+    def _get_failure_case(self):
+        try:
+            return list(self.failure_data.keys())[0]
+        except Exception as e:
+            log.error(f"Error parsing the failure_data : {e}")
+            return None
 
     def run(self):
         """ """
-        if self.failure_case() == "REBOOT_NODE_RANDOMLY":
+        if self.failure_case_name == "REBOOT_NODE_RANDOMLY":
             self._run_reboot_node()
-        elif self.failure_case() == "NODE_DRAIN":
+        elif self.failure_case_name == "NODE_DRAIN":
             self._run_node_drain()
         else:
             raise NotImplementedError("Failure method is not Implimented")
@@ -179,12 +222,12 @@ class NodeFailures:
         log.info("Running Failure Case REBOOT_NODE_RANDOMLY .")
 
         # Get the node list
-        for node_type in self.failure_data[self.scenario_name][self.failure_case()][
-            "NODE_TYPE"
-        ]:
+        for node_type in self.failure_data[self.failure_case_name]["NODE_TYPE"]:
             ips = get_node_ips(node_type=node_type)
             random_ip = random.choice(ips)
+            log.info(f"Rebooting {node_type} Node IP: {random_ip}")
             self.cluster_obj.reboot_node(random_ip)
+            log.info("Waiting for node status.")
 
         self._post_scenario_checks()
 
@@ -196,7 +239,3 @@ class NodeFailures:
     def _post_scenario_checks(self):
         """ """
         log.info(" running Post scenario checks : {self.scenario_name}")
-
-    def __del__(self):
-        """ """
-        pass

@@ -1,41 +1,35 @@
 from ocs_ci.resiliency.resiliency_helper import Resiliency
-from ocs_ci.resiliency.resiliency_workload import workload_object
+
+# from ocs_ci.resiliency.resiliency_workload import workload_object
 import logging
+from ocs_ci.ocs import constants
 
 log = logging.getLogger(__name__)
 
 
 class TestResiliencyScenarios:
-    def test_resiliency_node_failure_scenario(self, pvc_factory):
+    def test_resiliency_node_failure_scenario(
+        self, multi_pvc_factory, fio_resiliency_workload
+    ):
         """ """
-        pvc = pvc_factory()
+        # Create pvcs with different access_modes
+        size = 5
+        access_modes = [constants.ACCESS_MODE_RWO]
+        pvc_objs = multi_pvc_factory(
+            interface=constants.CEPHFILESYSTEM,
+            access_modes=access_modes,
+            # access_mode_dist_ratio=[1, 1],
+            size=size,
+            num_of_pvc=2,
+        )
 
-        scenarios = ["NODE_FAILURES"]
+        for pv_obj in pvc_objs:
+            fio_resiliency_workload(pv_obj)
 
-        workload_data = {
-            "name": "fio-workload-xyx",
-            "namespace": f"{pvc.namespace}",
-            "file_name": "fio_workload-xyz",
-            "pvc_name": f"{pvc.name}",
-            "replicas": 1,
-        }
+        scenario = "NODE_FAILURES"
 
-        workload = workload_object("FIO", workload_data)
-        workload.start_workload()
-        import time
+        resiliency = Resiliency(scenario)
 
-        log.info("Workload Started...")
-        time.sleep(10)
+        resiliency.start()
 
-        resiliency = Resiliency(scenarios=scenarios)
-
-        # Setup before starting
-        assert resiliency.run_workload(pvc)
-
-        # Start the failure injection process
-        assert resiliency.start()
-
-        # Cleanup after completion
         resiliency.cleanup()
-
-        workload.stop()

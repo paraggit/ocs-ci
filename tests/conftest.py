@@ -8110,3 +8110,21 @@ def clone_odf_monitoring_compare_tool(request, tmp_path_factory):
         constants.ODF_MONITORING_TOOL_REPO, str(repo_dir), branch="main", tmp_repo=True
     )
     return repo_dir
+
+
+@pytest.fixture
+def fio_resiliency_workload(request):
+    """ """
+    from ocs_ci.resiliency.resiliency_workload import FioWorkload
+
+    def factory(pvc_obj):
+        fio = FioWorkload(pvc_obj)
+        fio.start_workload()
+        # yield
+
+        def finalizer():
+            fio.stop_workload()
+
+        request.addfinalizer(finalizer)
+
+    return factory

@@ -4,7 +4,7 @@ metadata:
   name: {{ fio_name }}  # FIO workload name
   namespace: {{ namespace }}  # OpenShift namespace
 spec:
-  replicas: 1
+  replicas: {{ replicas }}
   selector:
     matchLabels:
       app: {{ fio_name }}
@@ -15,6 +15,9 @@ spec:
     spec:
       containers:
         - name: fio
+          securityContext:
+            runAsUser: 0
+            privileged: true
           image: quay.io/ocsci/nginx:fio
           command:
             - fio
@@ -27,7 +30,7 @@ spec:
             - "--runtime=60"
             - "--group_reporting"
             - "--time_based"
-            - "--filename=/mnt/{{ fio_name }}"
+            - "--filename=/mnt/{{ fio_filename }}"
           volumeMounts:
             - name: fio-volume
               mountPath: /mnt

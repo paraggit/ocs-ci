@@ -4,7 +4,7 @@ metadata:
   name: {{ fio_name }}  # FIO workload name
   namespace: {{ namespace }}  # OpenShift namespace
 spec:
-  replicas: 1
+  replicas: {{ replicas }}
   selector:
     matchLabels:
       app: {{ fio_name }}
@@ -15,6 +15,9 @@ spec:
     spec:
       containers:
         - name: fio
+          securityContext:
+            runAsUser: 0
+            privileged: true
           image: quay.io/ocsci/nginx:fio
           command:
             - fio
@@ -27,14 +30,14 @@ spec:
             - "--runtime=60"
             - "--group_reporting"
             - "--time_based"
-            - "--filename=/mnt/{{ fio_name }}"
-          volumeMounts:
+            - "--filename=/dev/blockdevice"  # Block device path
+          volumeDevices:  # Using volumeDevices for Block mode
             - name: fio-volume
-              mountPath: /mnt
+              devicePath: /dev/blockdevice  # Path to block device inside the container
       restartPolicy: Always
       volumes:
         - name: fio-volume
           persistentVolumeClaim:
-            claimName: {{ pvc_claim_name }}  # PVC claim name
+            claimName: {{ pvc_claim_name }}  # PVC claim name for block device
   strategy:
     type: Recreate
