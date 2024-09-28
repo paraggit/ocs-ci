@@ -1,5 +1,7 @@
 import base64
 import logging
+import json
+from datetime import datetime
 
 from ocs_ci.ocs.ocp import OCP
 from ocs_ci.ocs import constants
@@ -9,6 +11,7 @@ from ocs_ci.ocs.resources.pvc import get_deviceset_pvcs
 from ocs_ci.ocs.exceptions import UnexpectedBehaviour
 from ocs_ci.utility.retry import retry
 from ocs_ci.utility.kms import get_kms_deployment
+from ocs_ci.utility.utils import exec_cmd
 
 log = logging.getLogger(__name__)
 
@@ -408,3 +411,101 @@ class PVKeyrotation(KeyRotation):
             assert False
 
         return True
+
+    @staticmethod
+    def pv_keyrotation_job_details(namespace, pvc_name):
+        """
+        Retrieve the details for the latest Key Rotation Job for a specific PVC.
+
+        Args:
+            namespace (str): The namespace in which to search for the jobs.
+            pvc_name (str): The name of the Persistent Volume Claim (PVC) to filter the jobs.
+
+        Returns:
+            dict: The details of the latest Key Rotation Job for the specified PVC, or None if no jobs are found.
+
+        """
+        latest_cronjob = None
+        latest_time = None
+
+        cmd = f"oc get {constants.KEYROTATION_JOB_CRD} -n {namespace} -o json"
+
+        try:
+            result = exec_cmd(cmd)
+            keyrotation_job_data = json.loads(result.stdout)
+            log.info(
+                "Command executed successfully. Retrieved data for Key Rotation Jobs."
+            )
+        except Exception as e:
+            log.error(f"Failed to execute command {cmd}. Error: {e}")
+            return None
+
+        log.info(f"Filtering jobs for PVC: {pvc_name}")
+
+        for item in keyrotation_job_data.get("items", []):
+            if item["spec"]["target"]["persistentVolumeClaim"] == pvc_name:
+                creation_timestamp = item["metadata"]["creationTimestamp"]
+                creation_time = datetime.fromisoformat(creation_timestamp.rstrip("Z"))
+                log.debug(
+                    f"Checking job: {item['metadata']['name']}, created at: {creation_time}"
+                )
+
+                if latest_time is None or creation_time > latest_time:
+                    latest_time = creation_time
+                    latest_cronjob = item
+
+        if latest_cronjob:
+            log.info(
+                f"Latest Key Rotation Job for PVC '{pvc_name}': {latest_cronjob['metadata']['name']}"
+            )
+            log.info(
+                f"Creation Timestamp: {latest_cronjob['metadata']['creationTimestamp']}"
+            )
+            log.info(f"Result: {latest_cronjob['status'].get('result', 'N/A')}")
+        else:
+            log.info(f"No Key Rotation Job found for PVC: {pvc_name}")
+
+        return latest_cronjob
+
+    @staticmethod
+    def pv_keyrotation_cronjob_details(namespace, pvc_name):
+        """
+        Retrieve details of the Key Rotation CronJob for a specific PVC in a given namespace.
+
+        Args:
+            namespace (str): The namespace in which to search for the cronjobs.
+            pvc_name (str): The name of the Persistent Volume Claim (PVC) to filter the cronjobs.
+
+        Returns:
+            dict: The details of the Key Rotation CronJob for the specified PVC, or None if no cronjobs are found.
+        """
+        cmd = f"oc get {constants.KEYROTATION_CRONJOB_CRD} -n {namespace} -o json"
+
+        try:
+            result = exec_cmd(cmd)
+            cronjobdata = json.loads(result.stdout).get("items", [])
+            log.info(
+                "Command executed successfully. Retrieved data for Key Rotation CronJobs."
+            )
+        except Exception as e:
+            log.error(f"Failed to get key rotation cronjob. Error: {e}")
+            return None
+
+        log.info(f"Filtering cronjobs for PVC: {pvc_name}")
+
+        # Filter the cronjobs based on the provided PVC name
+        crondata = [
+            data
+            for data in cronjobdata
+            if data["spec"]["jobTemplate"]["spec"]["target"]["persistentVolumeClaim"]
+            == pvc_name
+        ]
+
+        if not crondata:
+            log.info(f"No KeyRotationCronJob information found for PVC: {pvc_name}")
+            return None
+
+        log.info(
+            f"Key Rotation CronJob found for PVC '{pvc_name}': {crondata[0]['metadata']['name']}"
+        )
+        return crondata[0]
