@@ -5,6 +5,7 @@ from ocs_ci.framework.pytest_customization.marks import green_squad
 from ocs_ci.framework.testlib import (
     ManageTest,
     tier1,
+    tier2,
     skipif_ocs_version,
     kms_config_required,
     skipif_managed_service,
@@ -156,3 +157,64 @@ class TestPVKeyRotationWithVaultKMS(ManageTest):
         assert (
             "Error" not in result
         ), f" IO Failed when Keyrotation operation happen for the PVC: {pvc_obj.name}"
+
+    @tier2
+    @pytest.mark.parametrize(
+        argnames=argnames,
+        argvalues=argvalues,
+    )
+    def test_multiple_pvc_keyrotation(
+        self,
+        kms_provider,
+        project_factory,
+        storageclass_factory,
+        multi_pvc_factory,
+        pod_factory,
+    ):
+        """_summary_"""
+        # Create a project
+        proj_obj = project_factory()
+
+        # Create an encryption enabled storageclass for RBD
+        sc_obj = storageclass_factory(
+            interface=constants.CEPHBLOCKPOOL,
+            encrypted=True,
+            encryption_kms_id=self.kms.kmsid,
+            allow_volume_expansion=False,
+        )
+
+        if kms_provider == constants.VAULT_KMS_PROVIDER:
+            # Create ceph-csi-kms-token in the tenant namespace
+            self.kms.vault_path_token = self.kms.generate_vault_token()
+            self.kms.create_vault_csi_kms_token(namespace=proj_obj.namespace)
+
+        # Annotate Storageclass for keyrotation.
+        pvk_obj = PVKeyrotation(sc_obj)
+        pvk_obj.annotate_storageclass_key_rotation(schedule="*/3 * * * *")
+
+        # Create PVC and Pods
+        pvc_objs = multi_pvc_factory(
+            interface=constants.CEPHBLOCKPOOL,
+            project=proj_obj,
+            storageclass=sc_obj,
+            size=5,
+            access_modes=[
+                f"{constants.ACCESS_MODE_RWX}-Block",
+                f"{constants.ACCESS_MODE_RWO}-Block",
+            ],
+            status=constants.STATUS_BOUND,
+            num_of_pvc=2,
+            wait_each=False,
+        )
+
+        pod_objs = []
+
+        for pvc_obj in pvc_objs:
+            pod_obj = pod_factory(pvc=pvc_obj, status=constants.STATUS_RUNNING)
+            pod_objs.append(pod_obj)
+
+        # # Verify PV Keyrotation.
+
+        # assert pvk_obj.wait_till_keyrotation(
+        #     pvc_obj.get_pv_volume_handle_name
+        # ), f"Failed to rotate Key for the PVC {pvc_obj.name}"

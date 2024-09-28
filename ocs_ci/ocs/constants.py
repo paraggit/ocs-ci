@@ -234,6 +234,8 @@ VM = "vm"
 HOSTED_CLUSTERS = "hostedclusters"
 OPERATOR_KIND = "Operator"
 DRIVER = "Driver"
+KEYROTATION_JOB_CRD = "encryptionkeyrotationjobs.csiaddons.openshift.io"
+KEYROTATION_CRONJOB_CRD = "encryptionkeyrotationcronjob.csiaddons.openshift.io"
 
 # Provisioners
 AWS_EFS_PROVISIONER = "openshift.org/aws-efs"
