@@ -15,15 +15,23 @@ class TestResiliencyScenarios:
         # Create pvcs with different access_modes
         size = 5
         access_modes = [constants.ACCESS_MODE_RWO]
-        pvc_objs = multi_pvc_factory(
+        cephfs_pvc_objs = multi_pvc_factory(
             interface=constants.CEPHFILESYSTEM,
             access_modes=access_modes,
-            # access_mode_dist_ratio=[1, 1],
             size=size,
             num_of_pvc=2,
         )
 
-        for pv_obj in pvc_objs:
+        rbd_pvc_objs = multi_pvc_factory(
+            interface=constants.CEPHBLOCKPOOL,
+            access_modes=access_modes,
+            size=size,
+            num_of_pvc=2,
+        )
+
+        # Starting Workload on the cluster
+        for pv_obj in cephfs_pvc_objs + rbd_pvc_objs:
+            # for pv_obj in rbd_pvc_objs :
             fio_resiliency_workload(pv_obj)
 
         scenario = "NODE_FAILURES"

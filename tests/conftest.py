@@ -8351,7 +8351,6 @@ def clone_odf_monitoring_compare_tool(request, tmp_path_factory):
     return repo_dir
 
 
-
 @pytest.fixture
 def fio_resiliency_workload(request):
     """ """
@@ -8359,15 +8358,17 @@ def fio_resiliency_workload(request):
 
     def factory(pvc_obj):
         fio = FioWorkload(pvc_obj)
-        fio.start_workload()
-        # yield
+        fio.start()
+        # th = fio.start()
 
         def finalizer():
             fio.stop_workload()
+            # th.join()
 
         request.addfinalizer(finalizer)
 
     return factory
+
 
 @pytest.fixture(scope="session", autouse=True)
 def run_description():
@@ -8413,4 +8414,3 @@ def setup_cnv(request):
             cnv_obj.uninstall_cnv()
 
     request.addfinalizer(finalizer)
-

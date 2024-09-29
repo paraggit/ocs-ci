@@ -5,9 +5,9 @@ from abc import ABC, abstractmethod
 from ocs_ci.framework import config
 from ocs_ci.utility.vsphere import VSPHERE
 from ocs_ci.ocs import constants
-from pyVmomi import vim
 import random
 import time
+from ocs_ci.utility.utils import ceph_health_check
 
 
 log = logging.getLogger(__name__)
@@ -49,60 +49,11 @@ class VsphereClusterFailures(ClusterFailures):
         vm = self.vsobj.get_vm_by_ip(node_ip, self.dc)
         vm_name = vm.name  # Store the VM name for logging
 
-        try:
-            if vm.runtime.powerState == vim.VirtualMachinePowerState.poweredOn:
-                log.info(f"Rebooting VM: {vm_name}")
-                vm.RebootGuest()
-            else:
-                log.info(
-                    f"VM {vm_name} is not powered on. Power state: {vm.runtime.powerState}"
-                )
-                return False
-        except vim.fault.ToolsUnavailable:
-            log.info(
-                f"VMware Tools are not available on {vm_name}. Performing a hard reset."
-            )
-            reset_task = vm.ResetVM_Task()
-            self.vsobj.wait_for_tasks([reset_task])
-        except Exception as e:
-            log.error(f"Error rebooting the VM {vm_name}: {e}")
-            return False
-
-        # Wait for the VM to power on and VMware Tools to be running
-        max_wait_time = 300  # seconds
-        wait_interval = 5  # seconds
-        elapsed_time = 0
-
-        while elapsed_time < max_wait_time:
-            time.sleep(wait_interval)
-            elapsed_time += wait_interval
-
-            try:
-                # Re-fetch the VM object to get updated properties
-                vm = self.vsobj.get_vm_by_ip(node_ip, self.dc)
-
-                power_state = vm.runtime.powerState
-                tools_status = vm.guest.toolsRunningStatus
-
-                if (
-                    power_state == vim.VirtualMachinePowerState.poweredOn
-                    and tools_status == "guestToolsRunning"
-                ):
-                    log.info(f"VM {vm_name} has rebooted and VMware Tools are running.")
-                    return True
-                else:
-                    log.info(
-                        f"Waiting for VM {vm_name} to reboot. "
-                        f"Power state: {power_state}, VMware Tools status: {tools_status}"
-                    )
-            except Exception as e:
-                log.error(f"Error retrieving VM {vm_name} status: {e}")
-                return False
-
-        log.error(
-            f"Timeout waiting for VM {vm_name} to reboot after {max_wait_time} seconds."
-        )
-        return False
+        self.vsobj.stop_vms([vm])
+        log.info(f"VM instance {vm_name} is STOPPED")
+        time.sleep(20)
+        self.vsobj.start_vms([vm])
+        log.info(f"VM instance {vm_name} Is started.")
 
     def bring_down_network_interface(self, node_name, interface_name):
         print(
@@ -224,10 +175,11 @@ class NodeFailures:
         # Get the node list
         for node_type in self.failure_data[self.failure_case_name]["NODE_TYPE"]:
             ips = get_node_ips(node_type=node_type)
-            random_ip = random.choice(ips)
-            log.info(f"Rebooting {node_type} Node IP: {random_ip}")
-            self.cluster_obj.reboot_node(random_ip)
-            log.info("Waiting for node status.")
+            for i in range(2):
+                random_ip = random.choice(ips)
+                log.info(f"Rebooting {node_type} Node IP: {random_ip}")
+                self.cluster_obj.reboot_node(random_ip)
+                log.info("Waiting for node status.")
 
         self._post_scenario_checks()
 
@@ -238,4 +190,6 @@ class NodeFailures:
 
     def _post_scenario_checks(self):
         """ """
-        log.info(" running Post scenario checks : {self.scenario_name}")
+        log.info("Running Post scenario checks : {self.scenario_name}")
+        log.info("Verify (and wait if needed) that ceph health is OK")
+        ceph_health_check(tries=45, delay=60)
