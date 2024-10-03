@@ -1,11 +1,12 @@
 NETWORK_FAILURES:
   WAIT_TILL_NODE_JOIN: true
   FAILURES:
-    NODE_NETWORK_DOWN:
+  - NODE_NETWORK_DOWN:
+      NETWORK_FAILURE_DURATION: 30
       node_selector: 
         - labels: []
       num_reboot_nodes: "0-3"
-    POD_NETWORK_FAILURE:
+  - POD_NETWORK_FAILURE:
       node_selector:
         - labels: []
   WORKLOAD:

@@ -4,8 +4,7 @@ import logging
 from ocs_ci.ocs import constants
 from ocs_ci.resiliency.node_failures import NodeFailures
 from ocs_ci.resiliency.network_failures import NetworkFailures
-
-# from ocs_ci.helpers.sanity_helpers import Sanity
+from ocs_ci.helpers.sanity_helpers import Sanity
 
 # Configure the logger
 logging.basicConfig(level=logging.INFO)
@@ -13,33 +12,29 @@ log = logging.getLogger(__name__)
 
 
 class ResiliencyConfig:
+    """Handles loading and parsing of the resiliency configuration."""
+
     def __init__(self):
-        # Load the YAML data
         self.data = self.load_yaml(
             os.path.join(constants.RESILIENCY_DIR, "conf", "resiliency.yaml")
         )
-
-        # Extract RUN_CONFIG details
-        resiliency_section = self.data.get("RESILIENCY", {})
-        run_config = resiliency_section.get("RUN_CONFIG", {})
-        self.stop_when_ceph_unhealthy = run_config.get(
+        self.run_config = self.data.get("RESILIENCY", {}).get("RUN_CONFIG", {})
+        self.stop_when_ceph_unhealthy = self.run_config.get(
             "STOP_WHEN_CEPH_UNHEALTHY", False
         )
-        self.iterate_scenarios = run_config.get("ITERATE_SCENARIOS", False)
+        self.iterate_scenarios = self.run_config.get("ITERATE_SCENARIOS", False)
+        self.failure_scenarios = self.data.get("RESILIENCY", {}).get(
+            "FAILURE_SCENARIOS", []
+        )
 
-        # Extract FAILURE_SCENARIOS
-        self.failure_scenarios = resiliency_section.get("FAILURE_SCENARIOS", [])
-
-    def load_yaml(self, file_path):
-        """Load the YAML file."""
+    @staticmethod
+    def load_yaml(file_path):
+        """Load and parse the YAML file."""
         try:
             with open(file_path, "r") as file:
                 return yaml.safe_load(file)
-        except yaml.YAMLError as exc:
+        except (yaml.YAMLError, FileNotFoundError) as exc:
             log.error(f"Error loading YAML file {file_path}: {exc}")
-            return {}
-        except FileNotFoundError as fnf_error:
-            log.error(f"YAML file not found: {file_path}. Error: {fnf_error}")
             return {}
 
     def get_run_config(self):
@@ -64,49 +59,33 @@ class ResiliencyConfig:
 
 
 class ResiliencyFailures(ResiliencyConfig):
+    """Handles loading failure cases from the configuration and iterating over them."""
+
     def __init__(self, scenario):
         super().__init__()
         self.scenario_name = scenario
         self.failure_cases_data = self.get_failure_cases_data()
-        self.failure_list = self.get_failure_cases()  # List of failures
-        self.workload = self.get_workload()
-        self._index = 0  # Internal index to track iteration
-
-    def get_failure_cases(self):
-        if self.failure_cases_data:
-            return self.failure_cases_data["FAILURES"]
-
-    def get_workload(self):
-        if self.failure_cases_data:
-            return self.failure_cases_data["WORKLOAD"]
+        self.failure_list = self.failure_cases_data.get("FAILURES", [])
+        self.workload = self.failure_cases_data.get("WORKLOAD", "")
+        self._index = 0
 
     def get_failure_cases_data(self):
-        """List the failures for the given scenario by iterating over YAML files."""
-        # failure_list = []
+        """Load the YAML file containing failure case details for the given scenario."""
         dir_loc = os.path.join(constants.RESILIENCY_DIR, "conf")
         log.info(f"Searching for scenario failures in directory: {dir_loc}")
 
-        try:
-            for filename in filter(
-                lambda f: f.endswith((".yaml", ".yml")), os.listdir(dir_loc)
-            ):
-                file_path = os.path.join(dir_loc, filename)
-                log.debug(f"Processing file: {file_path}")
-                data = self.load_yaml(
-                    file_path
-                )  # Call 'load_yaml' instead of the undefined '_load_yaml_file'
+        for filename in filter(
+            lambda f: f.endswith((".yaml", ".yml")), os.listdir(dir_loc)
+        ):
+            file_path = os.path.join(dir_loc, filename)
+            log.debug(f"Processing file: {file_path}")
+            data = self.load_yaml(file_path)
 
-                if self.scenario_name in data.keys():
-                    log.info(
-                        f"Found scenario '{self.scenario_name}' in file: {filename}"
-                    )
-                    return data[self.scenario_name]
+            if self.scenario_name in data:
+                log.info(f"Found scenario '{self.scenario_name}' in file: {filename}")
+                return data[self.scenario_name]
 
-        except FileNotFoundError as fnf_error:
-            log.error(f"Directory not found: {dir_loc}. Error: {fnf_error}")
-        except Exception as e:
-            log.error(f"Unexpected error accessing directory {dir_loc}: {e}")
-
+        log.error(f"Scenario '{self.scenario_name}' not found in any YAML files.")
         return {}
 
     def __iter__(self):
@@ -120,32 +99,24 @@ class ResiliencyFailures(ResiliencyConfig):
             failure = self.failure_list[self._index]
             self._index += 1
             return failure
-        else:
-            raise StopIteration
+        raise StopIteration
 
 
 class Resiliency(ResiliencyFailures):
+    """Main class for running resiliency tests."""
+
     def __init__(self, scenario):
         super().__init__(scenario)
-        self.scenario_name = scenario
-
-        # self.sanity_helpers = Sanity()
-
-    # def run_workload(self, worklod_data):
-    #     """Setup method before starting the resiliency scenario."""
-    #     log.info(f"Setting up workload... {worklod_data}")
-    #     # Start any workload mentioned in the config.
-    #     return True
+        self.sanity_helpers = Sanity()
 
     def post_scenario_check(self):
-        """Post scenario check for Ceph health."""
+        """Perform post-scenario checks like Ceph health and logs."""
         log.info("Checking CEPH health...")
-        # self.sanity_helpers.health_check(tries=40)
+        self.sanity_helpers.health_check(tries=40)
         log.info("Running must-gather logs.")
 
     def start(self):
-        """Iterate over the failures and inject them one by one."""
-
+        """Iterate over and inject the failures one by one."""
         for failure_case in self:
             self.inject_failure(failure_case)
 
@@ -155,32 +126,27 @@ class Resiliency(ResiliencyFailures):
         failure_obj = InjectFailures(self.scenario_name, failure)
         failure_obj.run_failure_case()
 
-    # def stop_workload(
-    #     self,
-    # ):
-    #     """Stop all workloads."""
-    #     log.info("Stopping all workloads...")
-
     def cleanup(self):
         """Cleanup method after the scenario is completed."""
         log.info("Cleaning up after the scenario.")
-        # self.stop_workload()
 
 
 class InjectFailures:
+    """Handles the actual injection of failures based on the scenario."""
+
     def __init__(self, scenario, failure_case):
         self.scenario = scenario
         self.failure_case = failure_case
-        # self.failure_case_name = self.failure_case.keys()[0]
 
     def failure_object(self):
-
-        if self.scenario == "NETWORK_FAILURE":
-            return NetworkFailures(self.scenario, self.failure_case)
-        elif self.scenario == "NODE_FAILURES":
-            return NodeFailures(self.scenario, self.failure_case)
+        if self.scenario == NetworkFailures.SCENARIO_NAME:
+            return NetworkFailures(self.failure_case)
+        elif self.scenario == NodeFailures.SCENARIO_NAME:
+            return NodeFailures(self.failure_case)
         else:
-            raise NotImplementedError(f"No implementation for {self.scenario}")
+            raise NotImplementedError(
+                f"No implementation for scenario '{self.scenario}'"
+            )
 
     def run_failure_case(self):
         """Inject the failure into the cluster."""
