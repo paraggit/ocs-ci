@@ -7,22 +7,23 @@ log = logging.getLogger(__name__)
 
 class NodeFailures:
     SCENARIO_NAME = "NODE_FAILURES"
+    FAILURE_METHODS = {
+        "REBOOT_NODE_RANDOMLY": "_run_reboot_node",
+        "NODE_DRAIN": "_run_node_drain",
+    }
 
     def __init__(self, failure_data):
         self.failure_data = failure_data
         self.failure_case_name = self._get_failure_case()
-        self.scenario_name = NodeFailures.SCENARIO_NAME
+        self.scenario_name = self.SCENARIO_NAME
         self.cluster_obj = get_cluster_object()
 
     def _get_failure_case(self):
         """Retrieve the failure case name from the provided failure data."""
-        try:
-            return next(
-                iter(self.failure_data)
-            )  # More efficient way to get the first key
-        except Exception as e:
-            log.error(f"Error parsing the failure_data: {e}")
+        if not self.failure_data:
+            log.error("Failure data is empty.")
             return None
+        return next(iter(self.failure_data))
 
     def run(self):
         """Run the failure scenario based on the failure case."""
@@ -30,36 +31,35 @@ class NodeFailures:
             log.error("No valid failure case name found. Exiting run method.")
             return
 
-        failure_methods = {
-            "REBOOT_NODE_RANDOMLY": self._run_reboot_node,
-            "NODE_DRAIN": self._run_node_drain,
-        }
-
-        # Run the failure method dynamically if it exists
-        failure_method = failure_methods.get(self.failure_case_name)
-        if failure_method:
+        method_name = self.FAILURE_METHODS.get(self.failure_case_name)
+        if method_name and hasattr(self, method_name):
+            failure_method = getattr(self, method_name)
             failure_method()
             self._post_scenario_checks()
         else:
             raise NotImplementedError(
-                f"Failure method for {self.failure_case_name} is not implemented."
+                f"Failure method for '{self.failure_case_name}' is not implemented."
             )
 
     def _run_reboot_node(self):
         """Simulate the reboot of nodes."""
         log.info("Running Failure Case: REBOOT_NODE_RANDOMLY.")
-        for node_type in self.failure_data[self.failure_case_name].get("NODE_TYPE", []):
-            for _ in range(2):  # Reboot 2 nodes
+        node_types = self.failure_data[self.failure_case_name].get("NODE_TYPE", [])
+        num_nodes = self.failure_data[self.failure_case_name].get("NUM_NODES", 2)
+        for node_type in node_types:
+            for _ in range(num_nodes):
                 log.info(f"Rebooting {node_type} node.")
                 self.cluster_obj.reboot_node(node_type=node_type)
+                log.info(f"{node_type.capitalize()} node rebooted.")
 
     def _run_node_drain(self):
         """Simulate draining of nodes."""
         log.info("Running Failure Case: NODE_DRAIN.")
-        log.info("Draining Node...")
+        # Implement node drain logic here
+        log.info("Draining node...")
 
     def _post_scenario_checks(self):
         """Perform post-scenario checks to ensure the cluster is healthy."""
-        log.info(f"Running Post scenario checks for {self.scenario_name}.")
+        log.info(f"Running post-scenario checks for {self.scenario_name}.")
         log.info("Verifying that Ceph health is OK (retrying if necessary).")
         ceph_health_check(tries=45, delay=60)

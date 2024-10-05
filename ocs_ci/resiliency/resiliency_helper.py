@@ -6,143 +6,137 @@ from ocs_ci.resiliency.node_failures import NodeFailures
 from ocs_ci.resiliency.network_failures import NetworkFailures
 from ocs_ci.helpers.sanity_helpers import Sanity
 
-# Configure the logger
-logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 
 class ResiliencyConfig:
     """Handles loading and parsing of the resiliency configuration."""
 
+    CONFIG_FILE = os.path.join(constants.RESILIENCY_DIR, "conf", "resiliency.yaml")
+
     def __init__(self):
-        self.data = self.load_yaml(
-            os.path.join(constants.RESILIENCY_DIR, "conf", "resiliency.yaml")
-        )
-        self.run_config = self.data.get("RESILIENCY", {}).get("RUN_CONFIG", {})
+        self.data = self.load_yaml(self.CONFIG_FILE)
+        resiliency = self.data.get("RESILIENCY", {})
+        self.run_config = resiliency.get("RUN_CONFIG", {})
         self.stop_when_ceph_unhealthy = self.run_config.get(
             "STOP_WHEN_CEPH_UNHEALTHY", False
         )
         self.iterate_scenarios = self.run_config.get("ITERATE_SCENARIOS", False)
-        self.failure_scenarios = self.data.get("RESILIENCY", {}).get(
-            "FAILURE_SCENARIOS", []
-        )
+        self.failure_scenarios = resiliency.get("FAILURE_SCENARIOS", [])
 
     @staticmethod
     def load_yaml(file_path):
         """Load and parse the YAML file."""
         try:
             with open(file_path, "r") as file:
-                return yaml.safe_load(file)
-        except (yaml.YAMLError, FileNotFoundError) as exc:
-            log.error(f"Error loading YAML file {file_path}: {exc}")
+                return yaml.safe_load(file) or {}
+        except FileNotFoundError:
+            log.error(f"YAML file not found: {file_path}")
             return {}
-
-    def get_run_config(self):
-        """Return the run configuration."""
-        return {
-            "STOP_WHEN_CEPH_UNHEALTHY": self.stop_when_ceph_unhealthy,
-            "ITERATE_SCENARIOS": self.iterate_scenarios,
-        }
-
-    def get_failure_scenarios(self):
-        """Return the failure scenarios."""
-        return self.failure_scenarios
+        except yaml.YAMLError as exc:
+            log.error(f"Error parsing YAML file {file_path}: {exc}")
+            return {}
 
     def __repr__(self):
         """Representation of the ResiliencyConfig object."""
         return (
             f"ResiliencyConfig("
-            f"STOP_WHEN_CEPH_UNHEALTHY={self.stop_when_ceph_unhealthy}, "
-            f"ITERATE_SCENARIOS={self.iterate_scenarios}, "
-            f"FAILURE_SCENARIOS={self.failure_scenarios})"
+            f"stop_when_ceph_unhealthy={self.stop_when_ceph_unhealthy}, "
+            f"iterate_scenarios={self.iterate_scenarios}, "
+            f"failure_scenarios={self.failure_scenarios})"
         )
 
 
-class ResiliencyFailures(ResiliencyConfig):
+class ResiliencyFailures:
     """Handles loading failure cases from the configuration and iterating over them."""
 
-    def __init__(self, scenario):
-        super().__init__()
-        self.scenario_name = scenario
+    SCENARIO_DIR = os.path.join(constants.RESILIENCY_DIR, "conf")
+
+    def __init__(self, scenario_name):
+        self.scenario_name = scenario_name
         self.failure_cases_data = self.get_failure_cases_data()
         self.failure_list = self.failure_cases_data.get("FAILURES", [])
         self.workload = self.failure_cases_data.get("WORKLOAD", "")
-        self._index = 0
+        self._iterator = iter(self.failure_list)
 
     def get_failure_cases_data(self):
         """Load the YAML file containing failure case details for the given scenario."""
-        dir_loc = os.path.join(constants.RESILIENCY_DIR, "conf")
-        log.info(f"Searching for scenario failures in directory: {dir_loc}")
+        log.info(
+            f"Searching for scenario '{self.scenario_name}' in directory: {self.SCENARIO_DIR}"
+        )
+        scenario_file = f"{self.scenario_name.lower()}.yaml"
+        file_path = os.path.join(self.SCENARIO_DIR, scenario_file)
 
-        for filename in filter(
-            lambda f: f.endswith((".yaml", ".yml")), os.listdir(dir_loc)
-        ):
-            file_path = os.path.join(dir_loc, filename)
-            log.debug(f"Processing file: {file_path}")
-            data = self.load_yaml(file_path)
-
+        if os.path.isfile(file_path):
+            data = ResiliencyConfig.load_yaml(file_path)
             if self.scenario_name in data:
-                log.info(f"Found scenario '{self.scenario_name}' in file: {filename}")
+                log.info(
+                    f"Found scenario '{self.scenario_name}' in file: {scenario_file}"
+                )
                 return data[self.scenario_name]
-
-        log.error(f"Scenario '{self.scenario_name}' not found in any YAML files.")
+            else:
+                log.error(
+                    f"Scenario '{self.scenario_name}' not found in file: {scenario_file}"
+                )
+        else:
+            log.error(
+                f"Scenario file '{scenario_file}' not found in directory: {self.SCENARIO_DIR}"
+            )
         return {}
 
     def __iter__(self):
-        """Return the iterator object itself."""
-        self._index = 0  # Reset the index whenever iteration starts
-        return self
-
-    def __next__(self):
-        """Return the next failure in the list or raise StopIteration."""
-        if self._index < len(self.failure_list):
-            failure = self.failure_list[self._index]
-            self._index += 1
-            return failure
-        raise StopIteration
+        """Return an iterator over the failure list."""
+        self._iterator = iter(self.failure_list)
+        return self._iterator
 
 
-class Resiliency(ResiliencyFailures):
+class Resiliency:
     """Main class for running resiliency tests."""
 
     def __init__(self, scenario):
-        super().__init__(scenario)
+        self.scenario_name = scenario
+        self.resiliency_failures = ResiliencyFailures(scenario)
         self.sanity_helpers = Sanity()
 
     def post_scenario_check(self):
         """Perform post-scenario checks like Ceph health and logs."""
-        log.info("Checking CEPH health...")
+        log.info("Checking Ceph health...")
         self.sanity_helpers.health_check(tries=40)
-        log.info("Running must-gather logs.")
+        log.info("Running must-gather logs...")
 
     def start(self):
         """Iterate over and inject the failures one by one."""
-        for failure_case in self:
+        for failure_case in self.resiliency_failures:
             self.inject_failure(failure_case)
+            self.post_scenario_check()
 
     def inject_failure(self, failure):
         """Inject the failure into the system."""
-        log.info(f"Running Failure Case for scenario {self.scenario_name}")
+        log.info(f"Running failure case for scenario '{self.scenario_name}': {failure}")
         failure_obj = InjectFailures(self.scenario_name, failure)
         failure_obj.run_failure_case()
 
     def cleanup(self):
         """Cleanup method after the scenario is completed."""
-        log.info("Cleaning up after the scenario.")
+        log.info("Cleaning up after the scenario...")
 
 
 class InjectFailures:
     """Handles the actual injection of failures based on the scenario."""
+
+    SCENARIO_CLASSES = {
+        NetworkFailures.SCENARIO_NAME: NetworkFailures,
+        NodeFailures.SCENARIO_NAME: NodeFailures,
+    }
 
     def __init__(self, scenario, failure_case):
         self.scenario = scenario
         self.failure_case = failure_case
 
     def failure_object(self):
-        if self.scenario == NetworkFailures.SCENARIO_NAME:
-            return NetworkFailures(self.failure_case)
-        elif self.scenario == NodeFailures.SCENARIO_NAME:
-            return NodeFailures(self.failure_case)
+        scenario_class = self.SCENARIO_CLASSES.get(self.scenario)
+        if scenario_class:
+            return scenario_class(self.failure_case)
         else:
             raise NotImplementedError(
                 f"No implementation for scenario '{self.scenario}'"
@@ -150,6 +144,8 @@ class InjectFailures:
 
     def run_failure_case(self):
         """Inject the failure into the cluster."""
-        log.info("Injecting failure into the cluster...")
+        log.info(
+            f"Injecting failure into the cluster for scenario '{self.scenario}'..."
+        )
         failure_obj = self.failure_object()
         failure_obj.run()

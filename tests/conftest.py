@@ -8353,19 +8353,20 @@ def clone_odf_monitoring_compare_tool(request, tmp_path_factory):
 
 @pytest.fixture
 def fio_resiliency_workload(request):
-    """ """
+    """
+    Pytest fixture to start and stop an FIO workload for resiliency testing.
+    """
     from ocs_ci.resiliency.resiliency_workload import FioWorkload
 
     def factory(pvc_obj):
         fio = FioWorkload(pvc_obj)
-        fio.start()
-        # th = fio.start()
+        fio.start_workload()
 
         def finalizer():
             fio.stop_workload()
-            # th.join()
 
         request.addfinalizer(finalizer)
+        return fio  # Return the FioWorkload instance if needed
 
     return factory
 
