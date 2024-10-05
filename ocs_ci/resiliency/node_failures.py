@@ -8,7 +8,7 @@ log = logging.getLogger(__name__)
 class NodeFailures:
     SCENARIO_NAME = "NODE_FAILURES"
     FAILURE_METHODS = {
-        "REBOOT_NODE_RANDOMLY": "_run_reboot_node",
+        "POWEROFF_NODE": "_run_poweroff_node",
         "NODE_DRAIN": "_run_node_drain",
     }
 
@@ -41,9 +41,9 @@ class NodeFailures:
                 f"Failure method for '{self.failure_case_name}' is not implemented."
             )
 
-    def _run_reboot_node(self):
+    def _run_poweroff_node(self):
         """Simulate the reboot of nodes."""
-        log.info("Running Failure Case: REBOOT_NODE_RANDOMLY.")
+        log.info("Running Failure Case: POWEROFF_NODE.")
         node_types = self.failure_data[self.failure_case_name].get("NODE_TYPE", [])
         num_nodes = self.failure_data[self.failure_case_name].get("NUM_NODES", 2)
         for node_type in node_types:

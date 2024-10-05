@@ -52,11 +52,12 @@ class ResiliencyFailures:
 
     SCENARIO_DIR = os.path.join(constants.RESILIENCY_DIR, "conf")
 
-    def __init__(self, scenario_name):
+    def __init__(self, scenario_name, failure_method=None):
         self.scenario_name = scenario_name
+        self.failure_method = failure_method
         self.failure_cases_data = self.get_failure_cases_data()
-        self.failure_list = self.failure_cases_data.get("FAILURES", [])
         self.workload = self.failure_cases_data.get("WORKLOAD", "")
+        self.failure_list = self.get_failure_list()
         self._iterator = iter(self.failure_list)
 
     def get_failure_cases_data(self):
@@ -84,6 +85,23 @@ class ResiliencyFailures:
             )
         return {}
 
+    def get_failure_list(self):
+        """Retrieve and optionally filter the failure list based on the failure method."""
+        failures = self.failure_cases_data.get("FAILURES", [])
+        if self.failure_method:
+            # Filter the failures to include only those matching the failure method
+            filtered_failures = [
+                {self.failure_method: failure[self.failure_method]}
+                for failure in failures
+                if self.failure_method in failure
+            ]
+            if not filtered_failures:
+                log.warning(
+                    f"No failures found for failure method '{self.failure_method}' in scenario '{self.scenario_name}'."
+                )
+            return filtered_failures
+        return failures
+
     def __iter__(self):
         """Return an iterator over the failure list."""
         self._iterator = iter(self.failure_list)
@@ -93,9 +111,9 @@ class ResiliencyFailures:
 class Resiliency:
     """Main class for running resiliency tests."""
 
-    def __init__(self, scenario):
+    def __init__(self, scenario, failure_method=None):
         self.scenario_name = scenario
-        self.resiliency_failures = ResiliencyFailures(scenario)
+        self.resiliency_failures = ResiliencyFailures(scenario, failure_method)
         self.sanity_helpers = Sanity()
 
     def post_scenario_check(self):
