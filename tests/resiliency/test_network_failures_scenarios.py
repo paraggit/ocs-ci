@@ -11,7 +11,7 @@ class TestNetworkFailures:
     def test_node_network_failure(self, multi_pvc_factory, fio_resiliency_workload):
         """ """
         scenario = "NETWORK_FAILURES"
-        failure_method = "POWEROFF_NODE"
+        failure_method = "NODE_NETWORK_DOWN"
 
         # Create pvcs with different access_modes
         size = 5
