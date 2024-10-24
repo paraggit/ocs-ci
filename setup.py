@@ -99,6 +99,7 @@ setup(
         "psycopg2-binary==2.9.9",
         "azure-keyvault-secrets==4.8.0",
         "pytest-jira==0.3.21",
+        "dynaconf==3.2.5",
     ],
     entry_points={
         "console_scripts": [
