@@ -3117,3 +3117,11 @@ DELETE = "delete"
 MACHINE_POOL_ACTIONS = [CREATE, EDIT, DELETE]
 # MDR multicluster roles
 MDR_ROLES = ["ActiveACM", "PassiveACM", "PrimaryODF", "SecondaryODF"]
+
+ENCRYPTION_DASHBOARD_CONTEXT_MAP = {
+    "Cluster-wide encryption": "cluster_wide_encryption",
+    "Storage class encryption": "storageclass_encryption",
+    "In-transit encryption": "intransit_encryption",
+    "Block storage": "block_storage",
+    "Object storage": "object_storage",
+}
