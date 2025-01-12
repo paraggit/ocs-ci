@@ -61,9 +61,12 @@ class EncryptionModule(PageNavigator):
                     "cluster_wide_encryption",
                     "storageclass_encryption",
                 ]
-                and "External Key Management Service" in line
+                # and "External Key Management Service" in line
             ):
-                encryption_summary[current_context]["kms"] = line.split(":")[-1].strip()
+                if "External Key Management Service" in line:
+                    encryption_summary[current_context]["kms"] = line.split(":")[
+                        -1
+                    ].strip()
                 encryption_summary[current_context]["status"] = (
                     extract_encryption_status(
                         root_element,
