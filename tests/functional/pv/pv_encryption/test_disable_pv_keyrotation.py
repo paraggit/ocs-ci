@@ -106,25 +106,18 @@ class TestDisablePVKeyrotaionOperation:
 
         """
 
-        # Disable Keyrotation globally by annotating the storageclass
-        # disable_annotations = {"keyrotation.csiaddons.openshift.io/enable": "false"}
-        # self.sc_obj.annotations(disable_annotations)
-        state = False
-        self.pv_keyrotation_obj.set_keyrotation_state_by_sc_annotation(state)
+        # Disable Keyrotation globally by annotating to storageclass
+        self.pv_keyrotation_obj.set_keyrotation_state_by_annotation(False)
 
         # Verify keyrotation jobs are removed.
         for pvc_obj in self.pvc_objs:
             with pytest.raises(ValueError):
-                self.pv_keyrotation_obj.get_keyrotationcronjob_for_pvc(pvc_obj)
+                self.pv_keyrotation_obj.get_keyrotation_cronjob_for_pvc(pvc_obj)
 
         # enable keyrotation by changing annotation
-        state = True
-        self.pv_keyrotation_obj.set_keyrotation_state_by_sc_annotation(state)
+        self.pv_keyrotation_obj.set_keyrotation_state_by_annotation(True)
 
         # verify keyrotation is enabled for the pvc
         assert self.pv_keyrotation_obj.wait_till_all_pv_keyrotation_on_vault_kms(
             self.pvc_objs
         ), "Failed PV keyrotation operation."
-
-    # def test_disable_pv_keyrotation_operation_by_RBAC_user(self):
-    #     """_summary_"""

@@ -455,7 +455,7 @@ class PVKeyrotation(KeyRotation):
         """
         Retrieves the key rotation CronJob associated with a PVC.
         """
-        pvc_obj.reload_if_missing_annotation("annotations")
+        pvc_obj.reload()
         cron_job_name = pvc_obj.data["metadata"]["annotations"].get(
             "reclaimspace.csiaddons.openshift.io/cronjob"
         )
@@ -476,8 +476,8 @@ class PVKeyrotation(KeyRotation):
         """
         return {
             pvc.name: {
-                "device_handle": pvc.get_pv_volume_handle_name(),
-                "vault_key": self.kms.get_pv_secret(pvc.get_pv_volume_handle_name()),
+                "device_handle": pvc.get_pv_volume_handle_name,
+                "vault_key": self.kms.get_pv_secret(pvc.get_pv_volume_handle_name),
             }
             for pvc in pvc_objs
         }
@@ -496,3 +496,4 @@ class PVKeyrotation(KeyRotation):
             raise UnexpectedBehaviour("PVC keys have not rotated yet.")
 
         log.info("PVC keys rotated successfully.")
+        return True
