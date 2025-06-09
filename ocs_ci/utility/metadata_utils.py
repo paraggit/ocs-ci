@@ -36,15 +36,18 @@ def check_setmetadata_availability(pod_obj):
         else [constants.CEPHFS_CTRLPLUGIN_NAME, constants.RBD_CTRLPLUGIN_NAME]
     )
 
-    plugin_pods = pod.get_all_pods(
-        namespace=config.ENV_DATA["cluster_namespace"],
-        selector=selectors,
-    )
-    log.info(f"Provisioner pods: {plugin_pods}")
+    @retry((CommandFailed, ResourceWrongStatusException), tries=3, delay=15)
+    def get_and_validate_plugin_pods():
+        plugin_pods = pod.get_all_pods(
+            namespace=config.ENV_DATA["cluster_namespace"],
+            selector=selectors,
+        )
+        log.info(f"Provisioner pods: {plugin_pods}")
+        pod.validate_pods_are_respinned_and_running_state(plugin_pods)
+        return plugin_pods
 
-    retry((CommandFailed, ResourceWrongStatusException), tries=3, delay=15)(
-        pod.validate_pods_are_respinned_and_running_state
-    )(plugin_pods)
+    # Get validated plugin pods
+    plugin_pods = get_and_validate_plugin_pods()
 
     all_containers_have_flag = True
 
