@@ -831,3 +831,8 @@ vault_kms_deployment_required = pytest.mark.skipif(
 )
 
 ui = compose(skipif_ibm_cloud_managed, pytest.mark.ui)
+
+skipif_lean_deployment = pytest.mark.skipif(
+    config.DEPLOYMENT.get("allow_lower_instance_requirements") is False,
+    reason="Test will not run on lean deployment",
+)

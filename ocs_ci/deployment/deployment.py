@@ -1754,6 +1754,13 @@ class Deployment(object):
                     }
                 cluster_data["spec"]["resources"] = resources
 
+        # Disable NFS when allow_lower_instance_requirements is false
+        if not config.DEPLOYMENT.get("allow_lower_instance_requirements", False):
+            logger.info(
+                "Disabling NFS because allow_lower_instance_requirements is false"
+            )
+            cluster_data["spec"]["nfs"] = {"enable": False}
+
         # Enable host network if enabled in config (this require all the
         # rules to be enabled on underlaying platform).
         if config.DEPLOYMENT.get("host_network"):
@@ -2225,6 +2232,13 @@ class Deployment(object):
                 cluster_data["spec"]["encryption"]["storageClassName"] = (
                     storageclassnames["encryption"]
                 )
+
+        # Disable NFS when allow_lower_instance_requirements is false
+        if not config.DEPLOYMENT.get("allow_lower_instance_requirements", False):
+            logger.info(
+                "Disabling NFS for external mode because allow_lower_instance_requirements is false"
+            )
+            cluster_data["spec"]["nfs"] = {"enable": False}
 
         # Enable in-transit encryption.
         if config.ENV_DATA.get("in_transit_encryption"):
