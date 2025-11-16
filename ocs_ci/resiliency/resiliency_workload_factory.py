@@ -360,6 +360,7 @@ class ResiliencyWorkloadFactory:
             fs_depth = filesystem_config.get("depth", 4)
             fs_width = filesystem_config.get("width", 5)
             fs_files = filesystem_config.get("files", 10)
+            fs_openflags = filesystem_config.get("openflags", "o_direct")
             fs_patterns = filesystem_config.get("patterns", [])
 
             interface_configs[constants.CEPHFILESYSTEM] = {
@@ -370,6 +371,7 @@ class ResiliencyWorkloadFactory:
                         depth=fs_depth,
                         width=fs_width,
                         files=fs_files,
+                        open_flags=fs_openflags,
                         default_threads=threads,
                         elapsed=elapsed,
                         interval=interval,
