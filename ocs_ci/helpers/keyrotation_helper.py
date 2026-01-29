@@ -1,5 +1,6 @@
 import base64
 import logging
+import time
 
 from ocs_ci.ocs.ocp import OCP
 from ocs_ci.ocs import constants
@@ -510,6 +511,15 @@ class PVKeyrotation(KeyRotation):
             f"Key rotation {'enabled' if enable else 'disabled'} for the StorageClass."
         )
 
+        # Wait for the CSI-Addons controller to reconcile the change
+        # The controller needs time to process the StorageClass annotation change
+        # and update PVCs accordingly
+        if enable:
+            log.info(
+                "Waiting 30 seconds for CSI-Addons controller to start reconciliation..."
+            )
+            time.sleep(30)
+
     def set_keyrotation_state_by_rbac_user(self, pvc_obj, suspend_state=True):
         """
         Updates key rotation CronJob state for a PVC.
@@ -676,7 +686,7 @@ class PVKeyrotation(KeyRotation):
             "Reset key rotation baseline - will capture new baseline on next verification."
         )
 
-    @retry(UnexpectedBehaviour, tries=10, delay=10)
+    @retry(UnexpectedBehaviour, tries=20, delay=15)
     def wait_for_keyrotation_cronjobs_recreation(self, pvc_objs):
         """
         Wait for key rotation cronjobs to be recreated for all PVCs after re-enabling.
