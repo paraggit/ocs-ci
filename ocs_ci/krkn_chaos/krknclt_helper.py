@@ -722,9 +722,10 @@ class PlanGenerator:
             workers = self.template_vars.get("workers", "1")
 
         # Component-specific labels must not use global `pod_label` (same as
-        # label_selector / random Ceph pick); Jinja |default() only applies
-        # when the variable is undefined, so named scenarios (noobaa, mon, …)
-        # need their own keys.
+        # label_selector / random Ceph pick); named blocks in plan.json.j2 now use
+        # literal selectors per scenario so random globals do not override them.
+        # Generic pod-scenarios / multi-disruption OSD label is also literal; overrides
+        # remain available via scenario_overrides / template_vars for custom plans.
         context = {
             "suffix": self._suffix,
             "namespace": self.namespace,

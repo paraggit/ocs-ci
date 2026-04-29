@@ -77,6 +77,7 @@ class TestKrKnNooBaaChaos:
     @polarion_id("OCS-7342")
     def test_krkn_noobaa_pod_disruption_with_s3_workload(
         self,
+        request,
         krkn_setup,
         krkn_scenario_directory,
         workload_ops,
@@ -98,6 +99,7 @@ class TestKrKnNooBaaChaos:
         graceful shutdown, simulating abrupt failures.
 
         Args:
+            request: pytest request (finalizer for workload cleanup on failure)
             krkn_setup: Krkn setup fixture
             krkn_scenario_directory: Directory for scenario configuration files
             workload_ops: WorkloadOps fixture that provides pre-configured S3 workloads
@@ -124,6 +126,27 @@ class TestKrKnNooBaaChaos:
         log.info(f"🔥 Expected pod kills: ~{duration_seconds // kill_interval_seconds}")
 
         workload_ops.setup_workloads()
+
+        _workload_cleanup_done = []
+
+        def _workload_validate_and_cleanup_once():
+            if _workload_cleanup_done:
+                return
+            try:
+                workload_ops.validate_and_cleanup()
+                log.info("✅ S3 workloads validated and cleaned up successfully")
+            except (UnexpectedBehaviour, CommandFailed) as e:
+                log.warning(
+                    "⚠️  Workload validation/cleanup issue (finalizer or post-chaos): %s",
+                    str(e),
+                )
+                log.info(
+                    "Temporary S3 failures during pod disruption are expected behavior"
+                )
+            finally:
+                _workload_cleanup_done.append(True)
+
+        request.addfinalizer(_workload_validate_and_cleanup_once)
 
         # Calculate number of iterations for repeated pod kills
         # We'll use KRKN's iteration feature to repeat the chaos
@@ -171,17 +194,9 @@ class TestKrKnNooBaaChaos:
         log.info("✅ Chaos execution completed")
         log.info(f"📊 Total iterations executed: {num_iterations}")
 
-        # Validate workloads
+        # Validate workloads (idempotent with finalizer: runs once if not already done)
         log.info("🔍 Validating S3 workload health after chaos")
-        try:
-            workload_ops.validate_and_cleanup()
-            log.info("✅ S3 workloads validated and cleaned up successfully")
-        except (UnexpectedBehaviour, CommandFailed) as e:
-            log.warning(f"⚠️  Workload validation/cleanup issue: {str(e)}")
-            # Note: Temporary S3 failures during pod kills are expected
-            log.info(
-                "Temporary S3 failures during pod disruption are expected behavior"
-            )
+        _workload_validate_and_cleanup_once()
 
         # Analyze results
         analyzer = KrknResultAnalyzer()
@@ -228,6 +243,7 @@ class TestKrKnNooBaaChaos:
     @polarion_id("OCS-7343")
     def test_krkn_noobaa_strength_testing(
         self,
+        request,
         krkn_setup,
         krkn_scenario_directory,
         workload_ops,
@@ -251,6 +267,10 @@ class TestKrKnNooBaaChaos:
         - Sustained chaos over long durations
 
         Args:
+            request: pytest request (finalizer for workload cleanup on failure)
+            krkn_setup: Krkn setup fixture
+            krkn_scenario_directory: Directory for scenario configuration files
+            workload_ops: WorkloadOps fixture that provides pre-configured S3 workloads
             stress_level: Level of stress testing (high, extreme, ultimate)
             duration_multiplier: Multiplier for base duration
             kill_interval: Interval between pod kills in seconds
@@ -275,6 +295,26 @@ class TestKrKnNooBaaChaos:
         # WORKLOAD SETUP
         log.info("Setting up S3 workloads for strength testing")
         workload_ops.setup_workloads()
+
+        _workload_cleanup_done = []
+
+        def _workload_validate_and_cleanup_once():
+            if _workload_cleanup_done:
+                return
+            try:
+                workload_ops.validate_and_cleanup()
+                log.info(
+                    "💪 Workloads survived strength testing - resilience confirmed!"
+                )
+            except (UnexpectedBehaviour, CommandFailed) as e:
+                validator = ValidationHelper()
+                validator.handle_workload_validation_failure(
+                    e, "noobaa", f"{stress_level} strength testing"
+                )
+            finally:
+                _workload_cleanup_done.append(True)
+
+        request.addfinalizer(_workload_validate_and_cleanup_once)
 
         # Base duration for stress testing
         base_duration = 600  # 10 minutes base
@@ -335,16 +375,9 @@ class TestKrKnNooBaaChaos:
             config, "noobaa", stress_level
         )
 
-        # Enhanced validation for strength testing
+        # Enhanced validation for strength testing (idempotent with finalizer)
         log.info("🔍 Validating workloads after strength testing")
-        try:
-            workload_ops.validate_and_cleanup()
-            log.info("💪 Workloads survived strength testing - resilience confirmed!")
-        except (UnexpectedBehaviour, CommandFailed) as e:
-            validator = ValidationHelper()
-            validator.handle_workload_validation_failure(
-                e, "noobaa", f"{stress_level} strength testing"
-            )
+        _workload_validate_and_cleanup_once()
 
         # Analyze results with strength-specific criteria
         analyzer = KrknResultAnalyzer()

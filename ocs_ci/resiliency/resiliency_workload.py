@@ -449,6 +449,7 @@ class WarpWorkload(Workload):
         self.is_workload_running = False
         self.workload_thread = None
         self.stop_event = None
+        self._warp_stopped_after_consecutive_failures = False
 
         log.info(
             f"Initialized Warp workload for MCG stress testing: bucket={bucket_name}"
@@ -461,7 +462,7 @@ class WarpWorkload(Workload):
 
         log.info(f"Starting Warp workload for bucket: {self.bucket_name}")
 
-        # Create Warp instance with unique pod name suffix (use last part of bucket name)
+        self._warp_stopped_after_consecutive_failures = False
         # Extract suffix from bucket name (e.g., "warp-test-abc" -> "abc")
         pod_suffix = (
             self.bucket_name.split("-")[-1]
@@ -525,8 +526,14 @@ class WarpWorkload(Workload):
         # Set up stop event
         self.stop_event = threading.Event()
 
+        # Stop retrying after repeated permanent failures (bad bucket, auth, etc.)
+        max_consecutive_failures = int(
+            self.workload_config.get("max_consecutive_warp_failures", 5)
+        )
+
         def run_warp_continuous():
-            """Run Warp benchmark continuously until stopped."""
+            """Run Warp benchmark continuously until stopped or failure budget exceeded."""
+            consecutive_failures = 0
             while not self.stop_event.is_set():
                 try:
                     log.info(f"Running Warp {workload_type} workload iteration")
@@ -544,11 +551,28 @@ class WarpWorkload(Workload):
                         validate=False,
                         multi_client=False,
                     )
+                    consecutive_failures = 0
                 except Exception as e:
-                    log.warning(f"Warp workload iteration failed: {e}")
+                    consecutive_failures += 1
+                    log.warning(
+                        "Warp workload iteration failed (%s/%s): %s",
+                        consecutive_failures,
+                        max_consecutive_failures,
+                        e,
+                    )
                     if self.stop_event.is_set():
                         break
-                    # Brief pause before retry
+                    if consecutive_failures >= max_consecutive_failures:
+                        log.error(
+                            "Stopping Warp background workload after %s consecutive "
+                            "failures (max_consecutive_warp_failures=%s). Last error: %s",
+                            consecutive_failures,
+                            max_consecutive_failures,
+                            e,
+                        )
+                        self.is_workload_running = False
+                        self._warp_stopped_after_consecutive_failures = True
+                        break
                     self.stop_event.wait(10)
 
         # Start workload thread
@@ -667,6 +691,7 @@ class WarpWorkload(Workload):
             "is_running": self.is_running(),
             "bucket_name": self.bucket_name,
             "workload_type": self.workload_config.get("workload_type", "mixed"),
+            "stopped_after_consecutive_failures": self._warp_stopped_after_consecutive_failures,
         }
 
 
