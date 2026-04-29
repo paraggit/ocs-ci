@@ -181,15 +181,22 @@ class Warp(object):
                 ip = p.exec_cmd_on_pod(command="hostname -i")
                 self.client_ips[p.name] = ip
 
-    def _exec_start_warp_in_background(self, cmd_with_logging):
+    def _exec_warp_resilient(self, command, exec_timeout):
         """
-        Run warp via oc exec; retry when the container is momentarily unavailable.
+        Run a warp-related shell command via oc exec; retry on transient container/exec errors.
 
         After OOM/restart, kubelet may not have the ``warp`` container attached yet,
         which surfaces as ``container not found`` or ``unable to upgrade connection``.
 
         Concurrent cluster load (e.g. volume snapshots, node I/O) can keep the pod or
         container unready longer than a short sleep; we wait for Ready before retrying.
+
+        Args:
+            command: Full command string passed to exec (e.g. blocking ``sh -c`` or
+                ``nohup ... &`` for background).
+            exec_timeout: ``oc exec`` timeout in seconds. Use the full benchmark
+                timeout when running warp synchronously; use a short value when the
+                command returns immediately (background start).
         """
         transient_markers = (
             "container not found",
@@ -215,15 +222,13 @@ class Warp(object):
                 time.sleep(delay_seconds)
             try:
                 self.pod_obj.exec_cmd_on_pod(
-                    cmd_with_logging,
+                    command,
                     out_yaml_format=False,
-                    timeout=10,
+                    timeout=exec_timeout,
                     container_name="warp",
                 )
                 if attempt > 1:
-                    log.info(
-                        "Warp background exec succeeded after %s attempts", attempt
-                    )
+                    log.info("Warp exec succeeded after %s attempts", attempt)
                 return
             except CommandFailed as exc:
                 msg = str(exc).lower()
@@ -273,7 +278,9 @@ class Warp(object):
             objects (int): number of objects
             obj_size (int): size of object
             timeout (int): timeout in seconds
-            validate (Boolean): Validates whether running workload is completed.
+            validate (Boolean): If True, run warp synchronously until completion then
+                check ``output.csv``; if False, start warp in the background (returns
+                quickly; no CSV validation in this method).
             multi_client (Boolean): If True, then run multi client benchmarking
             tls (Boolean): Use TLS (HTTPS) for transport
             insecure (Boolean): disable TLS certification verification
@@ -342,12 +349,22 @@ class Warp(object):
         # detached from /dev/null. Under Krkn chaos, "can't fork" is mitigated
         # slightly by one fewer shell layer than bash -c.
         inner = f"{cmd} > /tmp/warp.log 2>&1"
-        cmd_with_logging = f"nohup sh -c {shlex.quote(inner)} </dev/null &"
-        self._exec_start_warp_in_background(cmd_with_logging)
-        log.info(
-            f"Warp benchmark started in background. Check logs with: "
-            f"oc exec {self.pod_obj.name} -n {self.namespace} -c warp -- tail -f /tmp/warp.log"
-        )
+        if validate:
+            # Synchronous run: block until warp finishes so output.csv exists for validation.
+            cmd_blocking = f"sh -c {shlex.quote(inner)}"
+            self._exec_warp_resilient(cmd_blocking, exec_timeout=timeout)
+            log.info(
+                "Warp benchmark finished (synchronous run; validation will follow)"
+            )
+        else:
+            cmd_with_logging = f"nohup sh -c {shlex.quote(inner)} </dev/null &"
+            self._exec_warp_resilient(cmd_with_logging, exec_timeout=10)
+            log.info(
+                "Warp benchmark started in background. Check logs with: "
+                "oc exec %s -n %s -c warp -- tail -f /tmp/warp.log",
+                self.pod_obj.name,
+                self.namespace,
+            )
 
         if validate:
             self.validate_warp_workload()
