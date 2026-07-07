@@ -2469,7 +2469,7 @@ class CephXKeyRotation:
         Temporary workaround: restart rook-ceph-tools after CephX key rotation.
 
         Deletes the toolbox pod so its deployment recreates it with updated
-        CephX credentials.
+        CephX credentials, then waits 60 seconds for the new pod to stabilize.
 
         .. warning::
             This is a short-term workaround only. Remove this method and its
@@ -2487,10 +2487,12 @@ class CephXKeyRotation:
         new_tools_pod = get_ceph_tools_pod(wait=True, namespace=self.namespace)
         log.warning(
             "TEMPORARY WORKAROUND complete: rook-ceph-tools pod %s is Running; "
+            "waiting 60 seconds for toolbox to stabilize before continuing; "
             "remove restart_ceph_tools_pod_after_keyrotation once toolbox reloads "
             "rotated keys without a restart",
             new_tools_pod.name,
         )
+        time.sleep(60)
         return new_tools_pod
 
     def wait_for_rook_ceph_operator_ready(
