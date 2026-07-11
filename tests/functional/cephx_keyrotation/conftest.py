@@ -11,16 +11,18 @@ log = logging.getLogger(__name__)
 def cephx_keyrotation_setup():
     """
     Prepare cluster for CephX key rotation TC-01:
-      - enable daemon KeyGeneration policy on CephCluster
+      - enable daemon KeyGeneration policy on StorageCluster
       - wait for mon/mgr/osd/mds daemons and cluster Ready state
     """
     rotator = CephXKeyRotation()
-    rotator.ensure_daemon_key_rotation_enabled(key_generation=1)
+    rotator.ensure_daemon_key_rotation_enabled(
+        key_generation=CephXKeyRotation.DEFAULT_DAEMON_KEY_GENERATION
+    )
     rotator.wait_for_rook_daemon_pods_ready()
     rotator.wait_for_cluster_ready()
 
     initial_generation = rotator.get_spec_key_generation(rotator.COMPONENT_DAEMON)
-    if initial_generation >= 1:
+    if initial_generation >= CephXKeyRotation.DEFAULT_DAEMON_KEY_GENERATION:
         rotator.wait_for_rook_daemon_rotation(initial_generation, timeout=900)
 
     return rotator
@@ -42,7 +44,9 @@ def cephx_bootstrap_setup():
 def cephx_rotation_disabled_setup():
     """
     Prepare cluster for CephX policy-disabled verification:
-      - disable daemon/csi/rbdMirrorPeer keyRotationPolicy on CephCluster
+      - disable daemon keyRotationPolicy on StorageCluster cephCluster
+      - disable rbdMirrorPeer keyRotationPolicy on StorageCluster cephRBDMirror
+      - disable csi keyRotationPolicy on CephCluster
       - wait for mon/mgr/osd/mds daemons and cluster Ready state
     """
     rotator = CephXKeyRotation()

@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 
 RECONCILE_CYCLES = 3
 RECONCILE_SLEEP_SECONDS = 60
-EXPECTED_INITIAL_GENERATION = 1
+EXPECTED_INITIAL_GENERATION = 2
 
 
 @skipif_external_mode
