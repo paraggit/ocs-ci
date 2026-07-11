@@ -42,6 +42,96 @@ from ocs_ci.utility.utils import TimeoutSampler
 log = logging.getLogger(__name__)
 
 
+# TODO(cephx-keyrotation): Temporary workaround — run ceph CLI via
+# rook-ceph-operator instead of rook-ceph-tools until toolbox key-reload is
+# fixed. Set to False (or remove OperatorCephExecutor) when toolbox works again.
+USE_OPERATOR_FOR_CEPH_CMDS = True
+
+
+class OperatorCephExecutor:
+    """
+    Temporary Ceph CLI executor using the rook-ceph-operator pod.
+
+    Equivalent to::
+
+        oc rsh -n <ns> <rook-ceph-operator> ceph \\
+          --conf=/var/lib/rook/<ns>/<ns>.config \\
+          --cluster=<ns> --name=client.admin <args>
+    """
+
+    def __init__(self, operator_pod, namespace):
+        self.operator_pod = operator_pod
+        self.namespace = namespace
+        self.name = operator_pod.name
+
+    def _ceph_prefix(self):
+        ns = self.namespace
+        return (
+            f"ceph --conf=/var/lib/rook/{ns}/{ns}.config "
+            f"--cluster={ns} --name=client.admin"
+        )
+
+    def _wrap_ceph_command(self, command):
+        """Rewrite a ``ceph ...`` command to use the operator admin config."""
+        cmd = (command or "").strip()
+        prefix = self._ceph_prefix()
+        if cmd.startswith("ceph "):
+            return f"{prefix} {cmd[5:].lstrip()}"
+        if cmd == "ceph":
+            return prefix
+        return f"{prefix} {cmd}"
+
+    def exec_cmd_on_pod(self, command, out_yaml_format=True, timeout=600, **kwargs):
+        """
+        Execute *command* on the operator pod.
+
+        Ceph commands are rewritten with admin conf/cluster flags. Non-ceph
+        commands are passed through unchanged.
+        """
+        cmd = (command or "").strip()
+        if cmd.startswith("ceph"):
+            cmd = self._wrap_ceph_command(cmd)
+            log.info(
+                "TEMPORARY WORKAROUND (remove when toolbox key-reload is fixed): "
+                "running ceph via rook-ceph-operator pod %s: %s",
+                self.name,
+                cmd,
+            )
+        return self.operator_pod.exec_cmd_on_pod(
+            cmd,
+            out_yaml_format=out_yaml_format,
+            timeout=timeout,
+            **kwargs,
+        )
+
+    def exec_ceph_cmd(
+        self, ceph_cmd, format="json-pretty", out_yaml_format=True, timeout=600
+    ):
+        """Execute a Ceph command via the rook-ceph-operator pod."""
+        cmd = (ceph_cmd or "").strip()
+        if cmd.startswith("ceph "):
+            cmd = cmd[5:].lstrip()
+        elif cmd == "ceph":
+            cmd = ""
+        full_cmd = self._wrap_ceph_command(f"ceph {cmd}".rstrip())
+        if format:
+            full_cmd = f"{full_cmd} --format {format}"
+        log.info(
+            "TEMPORARY WORKAROUND (remove when toolbox key-reload is fixed): "
+            "running ceph via rook-ceph-operator pod %s: %s",
+            self.name,
+            full_cmd,
+        )
+        out = self.operator_pod.exec_cmd_on_pod(
+            full_cmd,
+            out_yaml_format=out_yaml_format,
+            timeout=timeout,
+        )
+        if isinstance(out, list):
+            return [item for item in out if item]
+        return out
+
+
 class CephXKeyRotation:
     """
     Rotate CephX keys via StorageCluster (daemon, rbdMirrorPeer) or CephCluster
@@ -147,6 +237,37 @@ class CephXKeyRotation:
         )
         self._cephfilesystem_obj = None
         self._storagecluster_obj = None
+        self._operator_ceph_executor = None
+
+    def get_ceph_cli_pod(self):
+        """
+        Return the pod used for Ceph CLI commands.
+
+        Temporary workaround: when ``USE_OPERATOR_FOR_CEPH_CMDS`` is True, return
+        an :class:`OperatorCephExecutor` that runs ceph via rook-ceph-operator.
+        Otherwise return the rook-ceph-tools pod.
+        """
+        if not USE_OPERATOR_FOR_CEPH_CMDS:
+            return get_ceph_tools_pod(namespace=self.namespace)
+
+        if self._operator_ceph_executor is None:
+            operators = get_operator_pods(namespace=self.namespace)
+            if not operators:
+                raise UnexpectedBehaviour(
+                    f"No rook-ceph-operator pod found in {self.namespace} "
+                    "for temporary Ceph CLI workaround"
+                )
+            operator_pod = operators[0]
+            log.warning(
+                "TEMPORARY WORKAROUND (remove when toolbox key-reload is fixed): "
+                "using rook-ceph-operator pod %s for Ceph CLI instead of "
+                "rook-ceph-tools",
+                operator_pod.name,
+            )
+            self._operator_ceph_executor = OperatorCephExecutor(
+                operator_pod, self.namespace
+            )
+        return self._operator_ceph_executor
 
     def _reload(self):
         self.cephcluster_obj.reload_data()
@@ -492,7 +613,7 @@ class CephXKeyRotation:
 
     def get_ceph_health_detail(self, toolbox_pod=None):
         """Return output of ``ceph health detail``."""
-        toolbox = toolbox_pod or get_ceph_tools_pod()
+        toolbox = toolbox_pod or self.get_ceph_cli_pod()
         return toolbox.exec_cmd_on_pod(
             "ceph health detail",
             out_yaml_format=False,
@@ -558,7 +679,7 @@ class CephXKeyRotation:
 
     def get_auth_entity_key_type(self, entity, toolbox_pod=None):
         """Return the CephX key type for *entity* when exposed by Ceph."""
-        toolbox = toolbox_pod or get_ceph_tools_pod()
+        toolbox = toolbox_pod or self.get_ceph_cli_pod()
         try:
             result = toolbox.exec_cmd_on_pod(
                 f"ceph auth get {entity} --format json",
@@ -1355,7 +1476,7 @@ class CephXKeyRotation:
         Returns:
             str: Key string, or empty string if the entity does not exist.
         """
-        toolbox = toolbox_pod or get_ceph_tools_pod()
+        toolbox = toolbox_pod or self.get_ceph_cli_pod()
         try:
             result = toolbox.exec_cmd_on_pod(
                 f"ceph auth get-key {entity} --format json",
@@ -1810,7 +1931,7 @@ class CephXKeyRotation:
 
     def _auth_entity_exists(self, entity, toolbox_pod=None):
         """Return True when *entity* is present in the Ceph auth store."""
-        toolbox = toolbox_pod or get_ceph_tools_pod()
+        toolbox = toolbox_pod or self.get_ceph_cli_pod()
         try:
             toolbox.exec_cmd_on_pod(
                 f"ceph auth get-key {entity} --format json",
@@ -1831,7 +1952,7 @@ class CephXKeyRotation:
         if entities:
             return entities
 
-        toolbox = toolbox_pod or get_ceph_tools_pod()
+        toolbox = toolbox_pod or self.get_ceph_cli_pod()
         mon_dump = toolbox.exec_ceph_cmd("ceph mon dump")
         discovered = []
         for mon in mon_dump.get("mons", []):
@@ -1849,7 +1970,7 @@ class CephXKeyRotation:
         if entities:
             return entities
 
-        toolbox = toolbox_pod or get_ceph_tools_pod()
+        toolbox = toolbox_pod or self.get_ceph_cli_pod()
         mgr_dump = toolbox.exec_ceph_cmd("ceph mgr dump")
         discovered = []
         active = mgr_dump.get("active_name")
@@ -1869,7 +1990,7 @@ class CephXKeyRotation:
         if entities:
             return entities
 
-        toolbox = toolbox_pod or get_ceph_tools_pod()
+        toolbox = toolbox_pod or self.get_ceph_cli_pod()
         osd_dump = toolbox.exec_ceph_cmd("ceph osd dump")
         discovered = []
         for osd in osd_dump.get("osds", []):
@@ -2968,7 +3089,7 @@ class CephXKeyRotation:
 
     def get_mon_keys_from_ceph_auth(self, toolbox_pod=None):
         """Return mon entity to key mapping from the Ceph auth store."""
-        toolbox = toolbox_pod or get_ceph_tools_pod()
+        toolbox = toolbox_pod or self.get_ceph_cli_pod()
         mon_entities = self.discover_rook_daemon_auth_entities(toolbox).get("mon", [])
         if not mon_entities:
             mon_entities = [
@@ -3119,7 +3240,7 @@ class CephXKeyRotation:
 
     def set_osd_out(self, osd_id):
         """Mark an OSD out via ``ceph osd out``."""
-        toolbox = get_ceph_tools_pod()
+        toolbox = self.get_ceph_cli_pod()
         toolbox.exec_cmd_on_pod(
             f"ceph osd out osd.{osd_id}",
             out_yaml_format=False,
@@ -3128,7 +3249,7 @@ class CephXKeyRotation:
 
     def set_osd_in(self, osd_id):
         """Mark an OSD back in via ``ceph osd in``."""
-        toolbox = get_ceph_tools_pod()
+        toolbox = self.get_ceph_cli_pod()
         toolbox.exec_cmd_on_pod(
             f"ceph osd in osd.{osd_id}",
             out_yaml_format=False,
@@ -3156,7 +3277,7 @@ class CephXKeyRotation:
 
     def delete_auth_entity(self, entity, toolbox_pod=None):
         """Delete a Ceph auth entity from the auth store."""
-        toolbox = toolbox_pod or get_ceph_tools_pod()
+        toolbox = toolbox_pod or self.get_ceph_cli_pod()
         toolbox.exec_cmd_on_pod(
             f"ceph auth del {entity}",
             out_yaml_format=False,
@@ -3495,7 +3616,7 @@ class CephXKeyRotation:
         Returns:
             dict: capability name to value (e.g. mon, mgr, osd).
         """
-        toolbox = toolbox_pod or get_ceph_tools_pod()
+        toolbox = toolbox_pod or self.get_ceph_cli_pod()
         try:
             result = toolbox.exec_ceph_cmd(f"ceph auth get {entity}")
         except CommandFailed as exc:
@@ -3790,7 +3911,7 @@ class CephXKeyRotation:
         return self._cephfilesystem_obj
 
     def _get_auth_entities_dict(self, toolbox_pod=None):
-        toolbox = toolbox_pod or get_ceph_tools_pod()
+        toolbox = toolbox_pod or self.get_ceph_cli_pod()
         result = toolbox.exec_ceph_cmd("ceph auth ls")
         if isinstance(result, dict):
             return result
