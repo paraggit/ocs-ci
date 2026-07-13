@@ -768,7 +768,7 @@ CEPH_DAEMON_LABEL_BY_COMPONENT = {
 # CephX authentication key rotation (Rook CephCluster spec.security.cephx)
 CEPHX_KEY_IDENTIFIER_ANNOTATION = "cephx-key-identifier"
 CEPHX_STATUS_ANNOTATION = "cephx-status"
-OSD_CEPHX_INIT_CONTAINER_NAMES = ("cephx-keyring-update", "load-cephx-key")
+OSD_CEPHX_INIT_CONTAINER_NAMES = ("cephx-keyring-update",)
 OSD_STORE_LABEL = "osd-store"
 OSD_CEPHX_INIT_SUCCESS_LOG = "got latest cephx key for OSD successfully"
 OSD_CEPHX_GET_OR_CREATE_LOG = "auth get-or-create"
