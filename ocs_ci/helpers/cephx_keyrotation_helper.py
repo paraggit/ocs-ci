@@ -1,11 +1,12 @@
 """
 Helper for CephX authentication key rotation on Rook-managed Ceph clusters.
 
-Daemon and rbdMirrorPeer rotation are driven from StorageCluster
-``spec.managedResources.<resource>.security.cephx`` (ODF passthrough to Rook):
-  - daemon → managedResources.cephCluster
-  - rbdMirrorPeer → managedResources.cephRBDMirror
-CSI still uses CephCluster ``spec.security.cephx``.
+All CephX key rotation (daemon, CSI, rbdMirrorPeer) is driven from StorageCluster
+``spec.managedResources.cephCluster.security.cephx`` (ODF passthrough to Rook):
+  - daemon → managedResources.cephCluster.security.cephx.daemon
+  - csi → managedResources.cephCluster.security.cephx.csi
+  - rbdMirrorPeer → managedResources.cephCluster.security.cephx.rbdMirrorPeer
+Status verification remains on CephCluster / CephFilesystem.
 This is distinct from OSD LUKS / StorageCluster encryption key rotation
 (see ``keyrotation_helper.KeyRotation``).
 
@@ -134,16 +135,14 @@ class OperatorCephExecutor:
 
 class CephXKeyRotation:
     """
-    Rotate CephX keys via StorageCluster (daemon, rbdMirrorPeer) or CephCluster
-    (csi) security.cephx configuration.
+    Rotate CephX keys via StorageCluster
+    ``managedResources.cephCluster.security.cephx``.
 
-    Supported rotation targets:
-      - ``daemon``: StorageCluster managedResources.cephCluster.security.cephx
-        (OSD, MGR, MDS, etc.). MON keys cannot be rotated (Ceph limitation).
-      - ``csi``: CSI driver client keys on CephCluster (affects new PVCs;
-        prior keys may be kept).
-      - ``rbdMirrorPeer``: StorageCluster
-        managedResources.cephRBDMirror.security.cephx.rbdMirrorPeer.
+    Supported rotation targets (all written on StorageCluster):
+      - ``daemon``: local Ceph daemons (OSD, MGR, MDS, etc.).
+        MON keys cannot be rotated on older Ceph (limitation).
+      - ``csi``: CSI driver client keys (affects new PVCs; prior keys may be kept).
+      - ``rbdMirrorPeer``: RBD mirror peer bootstrap token key.
 
     Example::
 
@@ -166,10 +165,11 @@ class CephXKeyRotation:
         COMPONENT_CSI,
         COMPONENT_RBD_MIRROR_PEER,
     )
-    # Components whose CephX rotation is written on StorageCluster managedResources
+    # All CephX rotation components are under managedResources.cephCluster
     STORAGECLUSTER_CEPHX_MANAGED_RESOURCES = {
         COMPONENT_DAEMON: "cephCluster",
-        COMPONENT_RBD_MIRROR_PEER: "cephRBDMirror",
+        COMPONENT_CSI: "cephCluster",
+        COMPONENT_RBD_MIRROR_PEER: "cephCluster",
     }
     CEPHX_KEY_CONFIG_ALIASES = {
         CONFIG_KEY_ROOK_DAEMON: COMPONENT_DAEMON,
@@ -400,10 +400,10 @@ class CephXKeyRotation:
 
     def patch_storagecluster_cephx_component(self, component, component_config):
         """
-        Patch StorageCluster managedResources.<resource>.security.cephx.<component>.
+        Patch StorageCluster managedResources.cephCluster.security.cephx.<component>.
 
-        Daemon uses ``cephCluster``; rbdMirrorPeer uses ``cephRBDMirror``.
-        Preserves sibling fields such as allowedCiphers. Writes the provided
+        Applies to daemon, csi, and rbdMirrorPeer. Preserves sibling fields such
+        as allowedCiphers and other cephx components. Writes the provided
         component_config as-is (including an explicit lower keyGeneration for
         negative tests).
         """
@@ -488,127 +488,99 @@ class CephXKeyRotation:
 
     def get_spec_key_type(self, component=None):
         """
-        Return ``spec.security.cephx.<component>.keyType`` from the CephCluster.
+        Return ``keyType`` for *component* from StorageCluster cephx config.
 
-        keyType configuration remains on CephCluster (not StorageCluster).
+        Path: managedResources.cephCluster.security.cephx.<component>.keyType
         """
+        component = component or self.COMPONENT_DAEMON
+        return self.get_storagecluster_component_spec(component).get("keyType")
+
+    def get_cephcluster_key_type(self, component=None):
+        """Return ``spec.security.cephx.<component>.keyType`` from the CephCluster."""
         component = component or self.COMPONENT_DAEMON
         return (self.get_spec_cephx().get(component) or {}).get("keyType")
 
     def patch_cephcluster_key_type(self, key_type, component=None):
         """
-        Set ``spec.security.cephx.<component>.keyType`` on the CephCluster.
+        Set ``keyType`` for *component* on StorageCluster (ODF passthrough to Rook).
 
-        keyType patches remain on CephCluster; they are not moved to
-        StorageCluster with daemon/rbdMirrorPeer keyGeneration.
+        Patches managedResources.cephCluster.security.cephx.<component>.keyType
+        while preserving sibling fields such as keyGeneration / keyRotationPolicy.
         """
         component = component or self.COMPONENT_DAEMON
-        cluster = self._get_cluster_dict()
-        security = cluster.get("spec", {}).get("security")
-        cephx = (security or {}).get("cephx") or {}
-        component_spec = cephx.get(component) or {}
-        key_type_path = f"/spec/security/cephx/{component}/keyType"
-        patch_ops = []
-
-        if security is None:
-            patch_ops.append(
-                {
-                    "op": "add",
-                    "path": "/spec/security",
-                    "value": {"cephx": {component: {"keyType": key_type}}},
-                }
-            )
-        elif not cephx:
-            patch_ops.append(
-                {
-                    "op": "add",
-                    "path": "/spec/security/cephx",
-                    "value": {component: {"keyType": key_type}},
-                }
-            )
-        elif component not in cephx:
-            patch_ops.append(
-                {
-                    "op": "add",
-                    "path": f"/spec/security/cephx/{component}",
-                    "value": {"keyType": key_type},
-                }
-            )
-        elif "keyType" in component_spec:
-            patch_ops.append(
-                {
-                    "op": "replace",
-                    "path": key_type_path,
-                    "value": key_type,
-                }
-            )
-        else:
-            patch_ops.append(
-                {
-                    "op": "add",
-                    "path": key_type_path,
-                    "value": key_type,
-                }
-            )
-
+        component_spec = dict(self.get_storagecluster_component_spec(component))
+        component_spec["keyType"] = key_type
         log.info(
-            f"Patching CephCluster spec.security.cephx.{component}.keyType to {key_type}"
+            "Patching StorageCluster managedResources.cephCluster.security.cephx."
+            f"{component}.keyType to {key_type}"
         )
-        self.cephcluster_obj.patch(
-            params=json.dumps(patch_ops),
-            format_type="json",
-        )
-        self._reload()
+        self.patch_storagecluster_cephx_component(component, component_spec)
+        self.wait_for_storagecluster_reconciliation(timeout=600, sleep=10)
 
     def remove_cephcluster_key_type(self, component=None):
-        """Remove ``spec.security.cephx.<component>.keyType`` from the CephCluster."""
+        """
+        Remove ``keyType`` for *component* from StorageCluster cephx config.
+
+        Preserves other fields on the component (keyGeneration, keyRotationPolicy).
+        """
         component = component or self.COMPONENT_DAEMON
-        component_spec = self.get_spec_cephx().get(component) or {}
+        component_spec = dict(self.get_storagecluster_component_spec(component))
         if "keyType" not in component_spec:
             log.info(
-                f"CephCluster spec.security.cephx.{component}.keyType not set; "
-                "nothing to remove"
+                "StorageCluster managedResources.cephCluster.security.cephx."
+                f"{component}.keyType not set; nothing to remove"
             )
             return
 
-        log.info(f"Removing CephCluster spec.security.cephx.{component}.keyType")
-        self.cephcluster_obj.patch(
-            params=json.dumps(
-                [{"op": "remove", "path": f"/spec/security/cephx/{component}/keyType"}]
-            ),
-            format_type="json",
+        component_spec.pop("keyType", None)
+        log.info(
+            "Removing StorageCluster managedResources.cephCluster.security.cephx."
+            f"{component}.keyType"
         )
-        self._reload()
+        if component_spec:
+            self.patch_storagecluster_cephx_component(component, component_spec)
+        else:
+            # No remaining fields — replace with empty object via full component patch
+            self.patch_storagecluster_cephx_component(component, {})
+        self.wait_for_storagecluster_reconciliation(timeout=600, sleep=10)
 
     def wait_for_cephcluster_key_type(
         self, key_type, timeout=300, sleep=10, component=None
     ):
-        """Wait until CephCluster ``spec.security.cephx.<component>.keyType`` matches."""
+        """
+        Wait until StorageCluster and CephCluster report *key_type* for *component*.
+
+        StorageCluster is the write target; CephCluster confirms ODF passthrough.
+        """
         component = component or self.COMPONENT_DAEMON
         log.info(
-            f"Waiting for CephCluster spec.security.cephx.{component}.keyType={key_type}"
+            f"Waiting for StorageCluster/CephCluster security.cephx.{component}."
+            f"keyType={key_type}"
         )
 
         def _matches():
-            actual = self.get_spec_key_type(component=component)
-            if actual == key_type:
+            sc_actual = self.get_spec_key_type(component=component)
+            cc_actual = self.get_cephcluster_key_type(component=component)
+            if sc_actual == key_type and cc_actual == key_type:
                 return True
             log.debug(
-                f"CephCluster spec.security.cephx.{component}.keyType={actual}, "
-                f"want {key_type}"
+                f"keyType pending for {component}: StorageCluster={sc_actual}, "
+                f"CephCluster={cc_actual}, want {key_type}"
             )
             return False
 
         for matched in TimeoutSampler(timeout, sleep, _matches):
             if matched:
                 log.info(
-                    f"CephCluster spec.security.cephx.{component}.keyType is {key_type}"
+                    f"StorageCluster and CephCluster security.cephx.{component}."
+                    f"keyType is {key_type}"
                 )
                 return True
 
         raise UnexpectedBehaviour(
-            f"Timed out waiting for CephCluster spec.security.cephx.{component}.keyType="
-            f"{key_type}"
+            f"Timed out waiting for security.cephx.{component}.keyType={key_type} "
+            f"(StorageCluster={self.get_spec_key_type(component=component)}, "
+            f"CephCluster={self.get_cephcluster_key_type(component=component)})"
         )
 
     def get_ceph_health_detail(self, toolbox_pod=None):
@@ -1039,10 +1011,8 @@ class CephXKeyRotation:
 
     def get_spec_key_generation(self, component):
         """
-        Read configured key generation for a rotation component from spec.
-
-        Daemon and rbdMirrorPeer generations are read from StorageCluster; CSI
-        from CephCluster.
+        Read configured key generation for a rotation component from
+        StorageCluster ``managedResources.cephCluster.security.cephx``.
 
         Args:
             component (str): One of ``daemon``, ``csi``, ``rbdMirrorPeer``.
@@ -1051,12 +1021,9 @@ class CephXKeyRotation:
             int: Configured generation, or 0 if unset.
         """
         self._validate_component(component)
-        if self.uses_storagecluster_for_cephx(component):
-            value = self.get_storagecluster_component_spec(component).get(
-                "keyGeneration", 0
-            )
-        else:
-            value = self.get_spec_cephx().get(component, {}).get("keyGeneration", 0)
+        value = self.get_storagecluster_component_spec(component).get(
+            "keyGeneration", 0
+        )
         return int(value or 0)
 
     def get_status_key_generation(self, entity):
@@ -1121,11 +1088,8 @@ class CephXKeyRotation:
         """
         Initiate a one-off CephX key rotation for a cephx component.
 
-        Daemon patches StorageCluster
-        ``managedResources.cephCluster.security.cephx.daemon``.
-        rbdMirrorPeer patches StorageCluster
-        ``managedResources.cephRBDMirror.security.cephx.rbdMirrorPeer``.
-        CSI still patches CephCluster ``spec.security.cephx``.
+        All components patch StorageCluster
+        ``managedResources.cephCluster.security.cephx.<component>``.
 
         Args:
             component (str): ``daemon``, ``csi``, or ``rbdMirrorPeer``.
@@ -1142,40 +1106,23 @@ class CephXKeyRotation:
         if key_generation is None:
             key_generation = self.get_next_key_generation(component)
 
-        component_config = {
-            "keyRotationPolicy": self.KEY_ROTATION_POLICY_KEY_GENERATION,
-            "keyGeneration": int(key_generation),
-        }
+        # Preserve sibling fields (e.g. keyType) already set on StorageCluster.
+        component_config = dict(self.get_storagecluster_component_spec(component))
+        component_config["keyRotationPolicy"] = self.KEY_ROTATION_POLICY_KEY_GENERATION
+        component_config["keyGeneration"] = int(key_generation)
         if component == self.COMPONENT_CSI and keep_prior_key_count_max is not None:
             component_config["keepPriorKeyCountMax"] = int(keep_prior_key_count_max)
 
-        if self.uses_storagecluster_for_cephx(component):
-            managed_name = self.get_storagecluster_cephx_managed_resource_name(
-                component
-            )
-            log.info(
-                f"Initiating CephX key rotation for {component} "
-                f"(generation={key_generation}) via StorageCluster "
-                f"managedResources.{managed_name} "
-                f"{self.namespace}/{constants.DEFAULT_CLUSTERNAME}"
-            )
-            self.patch_storagecluster_cephx_component(component, component_config)
-            self.wait_for_cephcluster_rotation(timeout=900, sleep=15)
-            self.wait_for_storagecluster_reconciliation(timeout=600, sleep=10)
-        else:
-            patch_ops = self._build_cephx_component_patch_ops(
-                component, component_config
-            )
-            log.info(
-                f"Initiating CephX key rotation for {component} "
-                f"(generation={key_generation}) on "
-                f"{self.namespace}/{self.ceph_cluster_name}"
-            )
-            self.cephcluster_obj.patch(
-                params=json.dumps(patch_ops),
-                format_type="json",
-            )
-            self._reload()
+        managed_name = self.get_storagecluster_cephx_managed_resource_name(component)
+        log.info(
+            f"Initiating CephX key rotation for {component} "
+            f"(generation={key_generation}) via StorageCluster "
+            f"managedResources.{managed_name} "
+            f"{self.namespace}/{constants.DEFAULT_CLUSTERNAME}"
+        )
+        self.patch_storagecluster_cephx_component(component, component_config)
+        self.wait_for_cephcluster_rotation(timeout=900, sleep=15)
+        self.wait_for_storagecluster_reconciliation(timeout=600, sleep=10)
         return int(key_generation)
 
     def rotate_daemon_keys(self, key_generation=None):
@@ -1618,14 +1565,10 @@ class CephXKeyRotation:
     def get_spec_rotation_policy(self, component):
         """Return configured keyRotationPolicy for a cephx component."""
         self._validate_component(component)
-        if self.uses_storagecluster_for_cephx(component):
-            return (
-                self.get_storagecluster_component_spec(component).get(
-                    "keyRotationPolicy"
-                )
-                or ""
-            )
-        return self.get_spec_cephx().get(component, {}).get("keyRotationPolicy") or ""
+        return (
+            self.get_storagecluster_component_spec(component).get("keyRotationPolicy")
+            or ""
+        )
 
     def is_rotation_policy_disabled(self, component):
         """Return True when *component* rotation policy is Disabled or unset."""
@@ -1633,12 +1576,9 @@ class CephXKeyRotation:
         return policy in ("", self.KEY_ROTATION_POLICY_DISABLED)
 
     def disable_component_key_rotation(self, component):
-        """Set ``keyRotationPolicy: Disabled`` for a cephx component."""
+        """Set ``keyRotationPolicy: Disabled`` for a cephx component on StorageCluster."""
         self._validate_component(component)
-        if self.uses_storagecluster_for_cephx(component):
-            component_spec = dict(self.get_storagecluster_component_spec(component))
-        else:
-            component_spec = dict(self.get_spec_cephx().get(component) or {})
+        component_spec = dict(self.get_storagecluster_component_spec(component))
 
         if component_spec.get("keyRotationPolicy") == self.KEY_ROTATION_POLICY_DISABLED:
             log.info(f"CephX key rotation already Disabled for {component}")
@@ -1646,15 +1586,7 @@ class CephXKeyRotation:
 
         component_spec["keyRotationPolicy"] = self.KEY_ROTATION_POLICY_DISABLED
         log.info(f"Disabling CephX key rotation policy for {component}")
-        if self.uses_storagecluster_for_cephx(component):
-            self.patch_storagecluster_cephx_component(component, component_spec)
-        else:
-            patch_ops = self._build_cephx_component_patch_ops(component, component_spec)
-            self.cephcluster_obj.patch(
-                params=json.dumps(patch_ops),
-                format_type="json",
-            )
-            self._reload()
+        self.patch_storagecluster_cephx_component(component, component_spec)
 
     def ensure_key_rotation_disabled(self):
         """Ensure daemon, CSI, and RBD mirror peer rotation policies are Disabled."""
@@ -3960,56 +3892,6 @@ class CephXKeyRotation:
                 {
                     "op": "add",
                     "path": component_path,
-                    "value": component_config,
-                }
-            )
-        return ops
-
-    def _build_cephx_component_patch_ops(self, component, component_config):
-        """
-        Build JSON patch ops for CephCluster ``spec.security.cephx.<component>``.
-
-        Kept for CSI rotation/disable only. Daemon and rbdMirrorPeer use
-        :meth:`_build_storagecluster_cephx_component_patch_ops` instead.
-        """
-        cluster = self._get_cluster_dict()
-        security = cluster.get("spec", {}).get("security")
-        spec_cephx = (security or {}).get("cephx") or {}
-        ops = []
-
-        if security is None:
-            ops.append(
-                {
-                    "op": "add",
-                    "path": "/spec/security",
-                    "value": {"cephx": {component: component_config}},
-                }
-            )
-            return ops
-
-        if not spec_cephx:
-            ops.append(
-                {
-                    "op": "add",
-                    "path": "/spec/security/cephx",
-                    "value": {component: component_config},
-                }
-            )
-            return ops
-
-        if component in spec_cephx:
-            ops.append(
-                {
-                    "op": "replace",
-                    "path": f"/spec/security/cephx/{component}",
-                    "value": component_config,
-                }
-            )
-        else:
-            ops.append(
-                {
-                    "op": "add",
-                    "path": f"/spec/security/cephx/{component}",
                     "value": component_config,
                 }
             )

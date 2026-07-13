@@ -223,12 +223,13 @@ class TestCephXAllowedCiphers:
 class TestCephXKeyType:
     @pytest.fixture(autouse=True)
     def _teardown(self, request):
-        """Remove custom keyType from the CephCluster after the test."""
+        """Remove custom keyType from StorageCluster after the test."""
 
         def fin():
             rotator = CephXKeyRotation()
             log.info(
-                "Teardown: removing CephCluster spec.security.cephx.daemon.keyType"
+                "Teardown: removing StorageCluster "
+                "managedResources.cephCluster.security.cephx.daemon.keyType"
             )
             try:
                 rotator.remove_cephcluster_key_type()
@@ -244,8 +245,9 @@ class TestCephXKeyType:
 
         Steps:
             1. Wait for cluster/daemons Ready (fixture enables daemon rotation).
-            2. Set CephCluster spec.security.cephx.daemon.keyType to aes256k.
-            3. Trigger daemon CephX key rotation for all daemons.
+            2. Set StorageCluster managedResources.cephCluster.security.cephx.daemon
+               keyType to aes256k.
+            3. Trigger daemon CephX key rotation via StorageCluster for all daemons.
             4. Verify rotated service daemon keys use aes256k.
             5. Verify AUTH_INSECURE_SERVICE_KEY_TYPE is reconciled and daemons stay healthy.
         """
@@ -257,7 +259,7 @@ class TestCephXKeyType:
 
         if rotator.get_spec_key_type() is not None:
             log.warning(
-                "CephCluster already has keyType=%s before test start",
+                "StorageCluster already has keyType=%s before test start",
                 rotator.get_spec_key_type(),
             )
 
@@ -277,7 +279,7 @@ class TestCephXKeyType:
         target_generation = rotator.get_next_key_generation(rotator.COMPONENT_DAEMON)
         log.info(
             f"Triggering daemon CephX key rotation to generation "
-            f"{target_generation} with keyType={key_type}"
+            f"{target_generation} with keyType={key_type} via StorageCluster"
         )
         rotator.rotate_daemon_keys(target_generation)
         rotator.wait_for_rook_daemon_rotation(target_generation, timeout=1200)
