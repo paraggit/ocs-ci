@@ -51,12 +51,12 @@ class TestCephXKeyRotation:
 
         Steps:
             1. Record keyGeneration, auth keys, pod names, and cephx-key-identifier
-               annotations for MON, MGR, OSD, and MDS.
+               annotations for MON, MGR, and MDS (OSDs use Deployment cephx-status).
             2. Trigger daemon key rotation (increment desired key generation).
             3. Wait for status.cephx updates on CephCluster and CephFilesystem;
                wait for daemon pod restarts.
-            4. Verify new keys, updated annotations, unchanged capabilities, and
-               cluster health (HEALTH_OK, Ready).
+            4. Verify new keys, updated annotations (non-OSD), OSD cephx-status,
+               unchanged capabilities, and cluster health (HEALTH_OK, Ready).
         """
         rotator = cephx_keyrotation_setup
         namespace = config.ENV_DATA["cluster_namespace"]
@@ -92,10 +92,16 @@ class TestCephXKeyRotation:
 
         for daemon, pods in pre_pod_states.items():
             assert pods, f"No Running pods found for {daemon} before rotation"
-            log.info(
-                f"Pre-rotation {daemon} pods: "
-                f"{', '.join(f'{name} (cephx-key-identifier={ann})' for name, ann in pods.items())}"
-            )
+            if daemon == "osd":
+                log.info(
+                    f"Pre-rotation {daemon} pods (cephx-key-identifier not used): "
+                    f"{', '.join(pods)}"
+                )
+            else:
+                log.info(
+                    f"Pre-rotation {daemon} pods: "
+                    f"{', '.join(f'{name} (cephx-key-identifier={ann})' for name, ann in pods.items())}"
+                )
 
         ceph_health_check(namespace=namespace)
 
@@ -118,6 +124,13 @@ class TestCephXKeyRotation:
         rotator.log_generation_status("Post-rotation")
 
         for daemon, pods in post_pod_states.items():
+            # OSDs use cephx-status on the Deployment, not cephx-key-identifier.
+            if daemon == "osd":
+                log.info(
+                    f"Post-rotation {daemon} pods (cephx-key-identifier not used): "
+                    f"{', '.join(pods)}"
+                )
+                continue
             for pod_name, annotation in pods.items():
                 if annotation is None and daemon == "mon" and not mon_auth_verifiable:
                     log.warning(
@@ -246,13 +259,13 @@ class TestCephXKeyRotation:
         TC-03: Verify OSD CephX key rotation and init container key load.
 
         Steps:
-            1. Record baseline OSD auth keys, deployment cephx-status annotations,
-               and pod cephx-key-identifier values.
+            1. Record baseline OSD auth keys and deployment cephx-status annotations.
             2. Trigger daemon key rotation (rotates all OSD auth entities).
             3. Wait for OSD status.cephx and pod restarts.
             4. Verify cephx-keyring-update init container logs and updated keys.
-            5. Verify PGs are active+clean and cluster health is OK.
-            6. Reconcile the same keyGeneration and verify idempotency.
+            5. Verify deployment cephx-status (OSDs do not use cephx-key-identifier).
+            6. Verify PGs are active+clean and cluster health is OK.
+            7. Reconcile the same keyGeneration and verify idempotency.
         """
         rotator = cephx_keyrotation_setup
         namespace = config.ENV_DATA["cluster_namespace"]
@@ -293,11 +306,8 @@ class TestCephXKeyRotation:
         pre_pod_states = rotator.capture_daemon_pod_state(constants.OSD_APP_LABEL)
         assert pre_pod_states, "No Running OSD pods found before rotation"
         log.info(
-            "Pre-rotation OSD pods: "
-            + ", ".join(
-                f"{name} (cephx-key-identifier={annotation})"
-                for name, annotation in pre_pod_states.items()
-            )
+            "Pre-rotation OSD pods (cephx-key-identifier not used on OSDs): "
+            + ", ".join(pre_pod_states)
         )
 
         ceph_health_check(namespace=namespace)
@@ -334,16 +344,10 @@ class TestCephXKeyRotation:
                 f"Post-rotation {deployment_name} cephx-status: {status or '<empty>'}"
             )
 
-        for pod_name, annotation in post_pod_states.items():
-            assert (
-                annotation is not None
-            ), f"OSD pod {pod_name} missing cephx-key-identifier annotation"
+        # OSDs track rotation via Deployment cephx-status, not cephx-key-identifier.
         log.info(
-            "Post-rotation OSD pods: "
-            + ", ".join(
-                f"{name} (cephx-key-identifier={annotation})"
-                for name, annotation in post_pod_states.items()
-            )
+            "Post-rotation OSD pods (cephx-key-identifier not used on OSDs): "
+            + ", ".join(post_pod_states)
         )
 
         rotator.wait_for_pgs_active_clean()

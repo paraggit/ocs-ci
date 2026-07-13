@@ -2754,8 +2754,9 @@ class CephXKeyRotation:
         Args:
             current_generation (int): Generation already applied in spec/status.
             auth_keys (dict): Entity to key mapping after rotation.
-            pod_states (dict): OSD pod name to cephx-key-identifier from
-                :meth:`capture_daemon_pod_state`.
+            pod_states (dict): OSD pod name to annotation map from
+                :meth:`capture_daemon_pod_state` (OSD pods do not use
+                cephx-key-identifier; restart detection is by pod name).
             entities (list): Auth entities to re-check.
             settle_timeout (int): Seconds to wait for a spurious reconcile.
         """
@@ -3763,6 +3764,11 @@ class CephXKeyRotation:
     def capture_daemon_pod_state(self, label):
         """
         Record Running pod names and cephx-key-identifier annotations for *label*.
+
+        Note:
+            OSD pods do not carry ``cephx-key-identifier`` (Rook uses Deployment
+            ``cephx-status`` plus the ``cephx-keyring-update`` init container).
+            For OSDs the annotation value is typically ``None``.
 
         Returns:
             dict: pod name to annotation value (may be None).

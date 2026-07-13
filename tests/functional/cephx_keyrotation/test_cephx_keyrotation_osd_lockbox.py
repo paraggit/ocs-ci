@@ -87,9 +87,7 @@ class TestCephXKeyRotationOSDLockbox:
         log.info(f"Triggered daemon CephX rotation to generation {target_generation}")
 
         rotator.wait_for_osd_rotation(target_generation)
-        post_pod_states = rotator.wait_for_pod_restarts(
-            pre_pod_states, constants.OSD_APP_LABEL
-        )
+        rotator.wait_for_pod_restarts(pre_pod_states, constants.OSD_APP_LABEL)
 
         assert (
             rotator.get_status_key_generation("osd") >= target_generation
@@ -105,12 +103,11 @@ class TestCephXKeyRotationOSDLockbox:
         rotator.verify_operator_lockbox_rotation_logs(len(encrypted_deployments))
         rotator.verify_encrypted_osd_pods_running(encrypted_osd_pods)
 
-        for pod_name, annotation in post_pod_states.items():
-            if pod_name not in {pod.name for pod in encrypted_osd_pods}:
-                continue
-            assert (
-                annotation is not None
-            ), f"Encrypted OSD pod {pod_name} missing cephx-key-identifier annotation"
+        # OSDs track rotation via Deployment cephx-status, not cephx-key-identifier.
+        log.info(
+            "Post-rotation encrypted OSD pods: "
+            + ", ".join(pod.name for pod in encrypted_osd_pods)
+        )
 
         rotator.wait_for_pgs_active_clean()
         ceph_health_check(namespace=namespace)
