@@ -1160,6 +1160,7 @@ class CephXKeyRotation:
                 f"{self.namespace}/{constants.DEFAULT_CLUSTERNAME}"
             )
             self.patch_storagecluster_cephx_component(component, component_config)
+            self.wait_for_cephcluster_rotation(timeout=900, sleep=15)
             self.wait_for_storagecluster_reconciliation(timeout=600, sleep=10)
         else:
             patch_ops = self._build_cephx_component_patch_ops(
@@ -1848,6 +1849,113 @@ class CephXKeyRotation:
         )
         log.info("Waiting for StorageCluster to be Ready")
         storage_cluster.wait_for_phase(phase=constants.STATUS_READY, timeout=timeout)
+
+    def wait_for_cephcluster_rotation(self, timeout=900, sleep=15):
+        """
+        Wait until CephCluster finishes CephX rotation reconcile.
+
+        Expected flow after a StorageCluster-initiated rotation:
+        ``Progressing`` (per-component messages such as Processing OSD…) →
+        ``Ready``. ``Error`` fails immediately.
+
+        ``Ready`` is accepted only after ``Progressing`` was observed so a
+        pre-reconcile Ready phase is not mistaken for completion.
+
+        Args:
+            timeout (int): Max seconds to wait (default 15 minutes).
+            sleep (int): Seconds between polls (default 15).
+
+        Returns:
+            bool: True when CephCluster is Ready after Progressing.
+
+        Raises:
+            UnexpectedBehaviour: If phase is Error, or Ready is not reached
+                within *timeout* after Progressing was seen.
+        """
+        cephcluster = OCP(
+            kind=constants.CEPH_CLUSTER,
+            namespace=self.namespace,
+            resource_name=self.ceph_cluster_name,
+        )
+        log.info(
+            f"Waiting for CephCluster {self.ceph_cluster_name} rotation "
+            f"(Progressing→Ready; Error fails; timeout={timeout}s, "
+            f"poll every {sleep}s)"
+        )
+        seen_progressing = False
+        last_phase = None
+        last_message = ""
+
+        def _poll_rotation_state():
+            """
+            Returns:
+                str: ``ready``, ``error``, or ``waiting``.
+            """
+            nonlocal seen_progressing, last_phase, last_message
+            cephcluster.reload_data()
+            status = cephcluster.data.get("status") or {}
+            phase = status.get("phase")
+            message = status.get("message", "") or ""
+            last_phase = phase
+            last_message = message
+            msg_suffix = f" message={message}" if message else ""
+
+            if phase == constants.STATUS_ERROR:
+                log.error(
+                    f"CephCluster {self.ceph_cluster_name} entered Error during "
+                    f"CephX key rotation{msg_suffix}"
+                )
+                return "error"
+
+            if phase == constants.STATUS_PROGRESSING:
+                if not seen_progressing:
+                    log.info(
+                        f"CephCluster {self.ceph_cluster_name} entered "
+                        f"Progressing{msg_suffix}"
+                    )
+                else:
+                    log.info(
+                        f"CephCluster {self.ceph_cluster_name} still "
+                        f"Progressing{msg_suffix}"
+                    )
+                seen_progressing = True
+                return "waiting"
+
+            if phase == constants.STATUS_READY:
+                if seen_progressing:
+                    log.info(
+                        f"CephCluster {self.ceph_cluster_name} rotation "
+                        f"completed; phase=Ready{msg_suffix}"
+                    )
+                    return "ready"
+                log.info(
+                    f"CephCluster {self.ceph_cluster_name} phase=Ready "
+                    "(pre-reconcile); waiting for Progressing"
+                )
+                return "waiting"
+
+            log.info(
+                f"CephCluster {self.ceph_cluster_name} phase={phase}"
+                f"{msg_suffix}; waiting for Progressing→Ready"
+            )
+            return "waiting"
+
+        for state in TimeoutSampler(timeout, sleep, _poll_rotation_state):
+            if state == "error":
+                raise UnexpectedBehaviour(
+                    f"CephCluster {self.ceph_cluster_name} entered Error during "
+                    f"CephX key rotation (phase={last_phase}"
+                    f"{f' message={last_message}' if last_message else ''})"
+                )
+            if state == "ready":
+                return True
+
+        raise UnexpectedBehaviour(
+            f"CephCluster {self.ceph_cluster_name} did not complete CephX "
+            f"rotation within {timeout}s "
+            f"(seen_progressing={seen_progressing}, last phase={last_phase}, "
+            f"message={last_message})"
+        )
 
     def wait_for_storagecluster_reconciliation(self, timeout=600, sleep=10):
         """
