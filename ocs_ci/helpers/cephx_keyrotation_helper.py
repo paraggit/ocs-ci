@@ -16,6 +16,7 @@ Reference: https://rook.io/docs/rook/latest/Storage-Configuration/Advanced/cephx
 import json
 import logging
 import re
+import shlex
 import time
 from threading import Thread
 
@@ -41,96 +42,6 @@ from ocs_ci.utility.retry import retry
 from ocs_ci.utility.utils import TimeoutSampler
 
 log = logging.getLogger(__name__)
-
-
-# TODO(cephx-keyrotation): Temporary workaround — run ceph CLI via
-# rook-ceph-operator instead of rook-ceph-tools until toolbox key-reload is
-# fixed. Set to False (or remove OperatorCephExecutor) when toolbox works again.
-USE_OPERATOR_FOR_CEPH_CMDS = True
-
-
-class OperatorCephExecutor:
-    """
-    Temporary Ceph CLI executor using the rook-ceph-operator pod.
-
-    Equivalent to::
-
-        oc rsh -n <ns> <rook-ceph-operator> ceph \\
-          --conf=/var/lib/rook/<ns>/<ns>.config \\
-          --cluster=<ns> --name=client.admin <args>
-    """
-
-    def __init__(self, operator_pod, namespace):
-        self.operator_pod = operator_pod
-        self.namespace = namespace
-        self.name = operator_pod.name
-
-    def _ceph_prefix(self):
-        ns = self.namespace
-        return (
-            f"ceph --conf=/var/lib/rook/{ns}/{ns}.config "
-            f"--cluster={ns} --name=client.admin"
-        )
-
-    def _wrap_ceph_command(self, command):
-        """Rewrite a ``ceph ...`` command to use the operator admin config."""
-        cmd = (command or "").strip()
-        prefix = self._ceph_prefix()
-        if cmd.startswith("ceph "):
-            return f"{prefix} {cmd[5:].lstrip()}"
-        if cmd == "ceph":
-            return prefix
-        return f"{prefix} {cmd}"
-
-    def exec_cmd_on_pod(self, command, out_yaml_format=True, timeout=600, **kwargs):
-        """
-        Execute *command* on the operator pod.
-
-        Ceph commands are rewritten with admin conf/cluster flags. Non-ceph
-        commands are passed through unchanged.
-        """
-        cmd = (command or "").strip()
-        if cmd.startswith("ceph"):
-            cmd = self._wrap_ceph_command(cmd)
-            log.info(
-                "TEMPORARY WORKAROUND (remove when toolbox key-reload is fixed): "
-                "running ceph via rook-ceph-operator pod %s: %s",
-                self.name,
-                cmd,
-            )
-        return self.operator_pod.exec_cmd_on_pod(
-            cmd,
-            out_yaml_format=out_yaml_format,
-            timeout=timeout,
-            **kwargs,
-        )
-
-    def exec_ceph_cmd(
-        self, ceph_cmd, format="json-pretty", out_yaml_format=True, timeout=600
-    ):
-        """Execute a Ceph command via the rook-ceph-operator pod."""
-        cmd = (ceph_cmd or "").strip()
-        if cmd.startswith("ceph "):
-            cmd = cmd[5:].lstrip()
-        elif cmd == "ceph":
-            cmd = ""
-        full_cmd = self._wrap_ceph_command(f"ceph {cmd}".rstrip())
-        if format:
-            full_cmd = f"{full_cmd} --format {format}"
-        log.info(
-            "TEMPORARY WORKAROUND (remove when toolbox key-reload is fixed): "
-            "running ceph via rook-ceph-operator pod %s: %s",
-            self.name,
-            full_cmd,
-        )
-        out = self.operator_pod.exec_cmd_on_pod(
-            full_cmd,
-            out_yaml_format=out_yaml_format,
-            timeout=timeout,
-        )
-        if isinstance(out, list):
-            return [item for item in out if item]
-        return out
 
 
 class CephXKeyRotation:
@@ -237,37 +148,10 @@ class CephXKeyRotation:
         )
         self._cephfilesystem_obj = None
         self._storagecluster_obj = None
-        self._operator_ceph_executor = None
 
     def get_ceph_cli_pod(self):
-        """
-        Return the pod used for Ceph CLI commands.
-
-        Temporary workaround: when ``USE_OPERATOR_FOR_CEPH_CMDS`` is True, return
-        an :class:`OperatorCephExecutor` that runs ceph via rook-ceph-operator.
-        Otherwise return the rook-ceph-tools pod.
-        """
-        if not USE_OPERATOR_FOR_CEPH_CMDS:
-            return get_ceph_tools_pod(namespace=self.namespace)
-
-        if self._operator_ceph_executor is None:
-            operators = get_operator_pods(namespace=self.namespace)
-            if not operators:
-                raise UnexpectedBehaviour(
-                    f"No rook-ceph-operator pod found in {self.namespace} "
-                    "for temporary Ceph CLI workaround"
-                )
-            operator_pod = operators[0]
-            log.warning(
-                "TEMPORARY WORKAROUND (remove when toolbox key-reload is fixed): "
-                "using rook-ceph-operator pod %s for Ceph CLI instead of "
-                "rook-ceph-tools",
-                operator_pod.name,
-            )
-            self._operator_ceph_executor = OperatorCephExecutor(
-                operator_pod, self.namespace
-            )
-        return self._operator_ceph_executor
+        """Return the rook-ceph-tools pod used for Ceph CLI commands."""
+        return get_ceph_tools_pod(namespace=self.namespace)
 
     def _reload(self):
         self.cephcluster_obj.reload_data()
@@ -1301,6 +1185,12 @@ class CephXKeyRotation:
         self.wait_for_pgs_active_clean(timeout=timeout, sleep=sleep)
         self.wait_for_cluster_ready(timeout=timeout)
 
+    @staticmethod
+    def _dd_io_stop_flag(file_path):
+        """Return a pod-local stop-flag path for background dd I/O."""
+        safe = file_path.strip("/").replace("/", "-")
+        return f"/tmp/ocs-ci-stop-dd-{safe}"
+
     def start_dd_io_in_background(
         self, pod_obj, file_path, bs="4k", count=10000, loop=True
     ):
@@ -1318,14 +1208,18 @@ class CephXKeyRotation:
             Thread: Background I/O thread.
         """
         mount_dir = file_path.rsplit("/", 1)[0]
+        stop_flag = self._dd_io_stop_flag(file_path)
         pod_obj.exec_cmd_on_pod(f"mkdir -p {mount_dir}", out_yaml_format=False)
+        pod_obj.exec_cmd_on_pod(f"rm -f {stop_flag}", out_yaml_format=False)
 
         if loop:
+            # Stop via stop-flag file — workload images often lack pkill/procps.
             dd_cmd = (
-                f"while true; do "
+                f"while [ ! -f {stop_flag} ]; do "
                 f"dd if=/dev/urandom of={file_path} bs={bs} count={count} "
                 f"status=none conv=notrunc; "
-                f"done"
+                f"done; "
+                f"rm -f {stop_flag}"
             )
         else:
             dd_cmd = (
@@ -1334,11 +1228,20 @@ class CephXKeyRotation:
             )
 
         def _run_dd():
-            pod_obj.exec_cmd_on_pod(
-                command=f"bash -c '{dd_cmd}'",
-                timeout=7200,
-                out_yaml_format=False,
-            )
+            try:
+                pod_obj.exec_cmd_on_pod(
+                    command=f"bash -c '{dd_cmd}'",
+                    timeout=7200,
+                    out_yaml_format=False,
+                )
+            except Exception as exc:
+                # Expected when stop_dd_io kills the in-flight dd/shell.
+                log.info(
+                    "Background dd I/O on %s:%s ended: %s",
+                    pod_obj.name,
+                    file_path,
+                    exc,
+                )
 
         thread = Thread(target=_run_dd, name=f"dd-io-{pod_obj.name}")
         thread.daemon = True
@@ -1348,12 +1251,26 @@ class CephXKeyRotation:
         return thread
 
     def stop_dd_io(self, pod_obj, file_path):
-        """Stop background ``dd`` I/O started by :meth:`start_dd_io_in_background`."""
+        """
+        Stop background ``dd`` I/O started by :meth:`start_dd_io_in_background`.
+
+        Uses a stop-flag file plus ``/proc`` cmdline matching so it works in
+        minimal workload images that do not ship ``pkill``/``procps``.
+        """
+        stop_flag = self._dd_io_stop_flag(file_path)
+        # shlex.quote keeps $pid expansion inside bash -c intact.
+        stop_script = (
+            f"touch {stop_flag}; "
+            "for pid in /proc/[0-9]*; do "
+            'cmd=$(tr "\\0" " " < "$pid/cmdline" 2>/dev/null) || continue; '
+            f'case "$cmd" in '
+            f'*of={file_path}*) kill "${{pid##*/}}" 2>/dev/null || true ;; '
+            "esac; "
+            "done; "
+            "true"
+        )
         pod_obj.exec_cmd_on_pod(
-            command=(
-                f"pkill -f 'dd if=/dev/urandom of={file_path}' || "
-                f"pkill -f 'bash -c while true' || true"
-            ),
+            command=f"bash -c {shlex.quote(stop_script)}",
             out_yaml_format=False,
             timeout=60,
         )
@@ -2826,40 +2743,6 @@ class CephXKeyRotation:
         log.info(f"Restarting rook-ceph-operator pod {operator_name}")
         operator_pod.delete()
         return operator_name
-
-    # TODO(cephx-keyrotation): Remove restart_ceph_tools_pod_after_keyrotation and its
-    # call site in background_cluster_operations._cephx_keyrotation_operation once
-    # rook-ceph-tools reloads CephX keys after rotation without a pod restart.
-    def restart_ceph_tools_pod_after_keyrotation(self, timeout=300):
-        """
-        Temporary workaround: restart rook-ceph-tools after CephX key rotation.
-
-        Deletes the toolbox pod so its deployment recreates it with updated
-        CephX credentials, then waits 60 seconds for the new pod to stabilize.
-
-        .. warning::
-            This is a short-term workaround only. Remove this method and its
-            caller when the upstream toolbox key-reload issue is fixed.
-        """
-        tools_pod = get_ceph_tools_pod(namespace=self.namespace)
-        pod_name = tools_pod.name
-        log.warning(
-            "TEMPORARY WORKAROUND (remove when cephx toolbox key-reload is fixed): "
-            "restarting rook-ceph-tools pod %s after CephX key rotation",
-            pod_name,
-        )
-        tools_pod.delete()
-        tools_pod.ocp.wait_for_delete(resource_name=pod_name, timeout=timeout)
-        new_tools_pod = get_ceph_tools_pod(wait=True, namespace=self.namespace)
-        log.warning(
-            "TEMPORARY WORKAROUND complete: rook-ceph-tools pod %s is Running; "
-            "waiting 60 seconds for toolbox to stabilize before continuing; "
-            "remove restart_ceph_tools_pod_after_keyrotation once toolbox reloads "
-            "rotated keys without a restart",
-            new_tools_pod.name,
-        )
-        time.sleep(60)
-        return new_tools_pod
 
     def wait_for_rook_ceph_operator_ready(
         self, previous_pod_name=None, timeout=300, sleep=15

@@ -252,12 +252,25 @@ def _induce_daemon_key_mismatch(rotator, namespace):
     Create a persistent daemon keyGeneration mismatch.
 
     Scales rook-ceph-operator to 0 so status cannot catch up, then bumps
-    StorageCluster daemon keyGeneration. Returns the target generation.
+    StorageCluster daemon keyGeneration (without waiting for rotation
+    completion — rook is intentionally down). Returns the target generation.
     """
     _scale_rook_operator(0, namespace)
     target_generation = rotator.get_next_rook_daemon_key_generation()
     log.info("Inducing CephX daemon key mismatch at generation %s", target_generation)
-    rotator.rotate_daemon_keys(target_generation)
+
+    # Patch StorageCluster only — do not call rotate_daemon_keys(), which waits
+    # for CephCluster Progressing→Ready (impossible while rook is scaled to 0).
+    component_config = dict(
+        rotator.get_storagecluster_component_spec(rotator.COMPONENT_DAEMON)
+    )
+    component_config["keyRotationPolicy"] = (
+        CephXKeyRotation.KEY_ROTATION_POLICY_KEY_GENERATION
+    )
+    component_config["keyGeneration"] = int(target_generation)
+    rotator.patch_storagecluster_cephx_component(
+        rotator.COMPONENT_DAEMON, component_config
+    )
 
     def _cephcluster_spec_reached():
         daemon_spec = rotator.get_spec_cephx().get("daemon") or {}
@@ -266,7 +279,8 @@ def _induce_daemon_key_mismatch(rotator, namespace):
     for ready in TimeoutSampler(300, 10, _cephcluster_spec_reached):
         if ready:
             log.info(
-                "CephCluster spec.security.cephx.daemon.keyGeneration >= %s",
+                "CephCluster spec.security.cephx.daemon.keyGeneration >= %s "
+                "(rook scaled to 0; status intentionally lagging)",
                 target_generation,
             )
             return target_generation
