@@ -47,6 +47,7 @@ log = logging.getLogger(__name__)
 PVC_DEPENDENT_BACKGROUND_OPERATIONS = frozenset(
     {
         "aggressive_clone_operation",
+        "aggressive_snapshot_operation",
         "clone_lifecycle",
         "snapshot_lifecycle",
         "longevity_operations",
@@ -194,12 +195,15 @@ class BackgroundClusterOperations:
         self._csi_addons_available = True  # Assume available until proven otherwise
         self._aggressive_clone_ops = None
         self._aggressive_clone_thread: Optional[threading.Thread] = None
+        self._aggressive_snapshot_ops = None
+        self._aggressive_snapshot_thread: Optional[threading.Thread] = None
 
         # Available operations
         self.available_operations = {
             "snapshot_lifecycle": self._snapshot_lifecycle_operation,
             "clone_lifecycle": self._clone_lifecycle_operation,
             "aggressive_clone_operation": self._aggressive_clone_operation,
+            "aggressive_snapshot_operation": self._aggressive_snapshot_operation,
             "node_taint_churn": self._node_taint_churn_operation,
             "osd_operations": self._osd_operations,
             "mds_failover": self._mds_failover_operation,
@@ -222,10 +226,14 @@ class BackgroundClusterOperations:
         self._aggressive_clone_enabled = (
             "aggressive_clone_operation" in self.enabled_operations
         )
+        self._aggressive_snapshot_enabled = (
+            "aggressive_snapshot_operation" in self.enabled_operations
+        )
         self._random_operations = {
             name: func
             for name, func in self.enabled_operations.items()
-            if name != "aggressive_clone_operation"
+            if name
+            not in ("aggressive_clone_operation", "aggressive_snapshot_operation")
         }
 
         log.info(
@@ -236,6 +244,11 @@ class BackgroundClusterOperations:
         if self._aggressive_clone_enabled:
             log.info(
                 "aggressive_clone_operation runs in a dedicated loop "
+                "(not part of the random background operation scheduler)"
+            )
+        if self._aggressive_snapshot_enabled:
+            log.info(
+                "aggressive_snapshot_operation runs in a dedicated loop "
                 "(not part of the random background operation scheduler)"
             )
 
@@ -264,6 +277,14 @@ class BackgroundClusterOperations:
             )
             self._aggressive_clone_thread.start()
             log.info("Aggressive clone operation loop started")
+        if self._aggressive_snapshot_enabled:
+            self._aggressive_snapshot_thread = threading.Thread(
+                target=self._aggressive_snapshot_loop,
+                name="AggressiveSnapshotOperationLoop",
+                daemon=True,
+            )
+            self._aggressive_snapshot_thread.start()
+            log.info("Aggressive snapshot operation loop started")
         log.info("Background cluster operations started")
 
     def stop(self, cleanup=True):
@@ -281,10 +302,20 @@ class BackgroundClusterOperations:
             self._aggressive_clone_ops is not None
             and self._aggressive_clone_ops.has_tracked_resources()
         )
+        aggressive_snapshot_thread_alive = (
+            self._aggressive_snapshot_thread is not None
+            and self._aggressive_snapshot_thread.is_alive()
+        )
+        has_aggressive_snapshot_resources = (
+            self._aggressive_snapshot_ops is not None
+            and self._aggressive_snapshot_ops.has_tracked_resources()
+        )
         if (
             not self._running
             and not aggressive_thread_alive
             and not has_aggressive_resources
+            and not aggressive_snapshot_thread_alive
+            and not has_aggressive_snapshot_resources
         ):
             return
 
@@ -292,6 +323,8 @@ class BackgroundClusterOperations:
 
         if self._aggressive_clone_ops is not None:
             self._aggressive_clone_ops.request_shutdown()
+        if self._aggressive_snapshot_ops is not None:
+            self._aggressive_snapshot_ops.request_shutdown()
 
         self._running = False
 
@@ -313,6 +346,23 @@ class BackgroundClusterOperations:
                     join_timeout,
                 )
 
+        if (
+            self._aggressive_snapshot_thread
+            and self._aggressive_snapshot_thread.is_alive()
+        ):
+            join_timeout = self._get_aggressive_snapshot_stop_join_timeout()
+            log.info(
+                "Waiting up to %ss for aggressive snapshot loop to finish current work",
+                join_timeout,
+            )
+            self._aggressive_snapshot_thread.join(timeout=join_timeout)
+            if self._aggressive_snapshot_thread.is_alive():
+                log.warning(
+                    "Aggressive snapshot loop did not exit within %ss; "
+                    "proceeding with resource cleanup",
+                    join_timeout,
+                )
+
         # Wait for operation threads
         for thread in self._operation_threads:
             if thread.is_alive():
@@ -322,8 +372,11 @@ class BackgroundClusterOperations:
             self._cleanup_resources()
             if self._aggressive_clone_ops:
                 self._aggressive_clone_ops.cleanup_all()
+            if self._aggressive_snapshot_ops:
+                self._aggressive_snapshot_ops.cleanup_all()
 
         self._aggressive_clone_thread = None
+        self._aggressive_snapshot_thread = None
         log.info("Background cluster operations stopped")
         self._log_final_summary()
 
@@ -749,6 +802,91 @@ class BackgroundClusterOperations:
 
             self._aggressive_clone_ops = AggressiveCloneOperations(self)
         self._aggressive_clone_ops.run()
+
+    # ==========================================================================
+    # Aggressive PVC Snapshot Operations
+    # ==========================================================================
+
+    def _aggressive_snapshot_loop(self):
+        """Continuously run aggressive snapshot operations in a dedicated loop."""
+        log.info("Aggressive snapshot operation loop started")
+        interval = self._get_aggressive_snapshot_loop_interval()
+        while self._running:
+            try:
+                if not self._namespace_exists():
+                    break
+                if (
+                    self._aggressive_snapshot_ops is not None
+                    and self._aggressive_snapshot_ops.is_shutdown_requested()
+                ):
+                    break
+                self._run_operation_safe(
+                    "aggressive_snapshot_operation",
+                    self._aggressive_snapshot_operation,
+                )
+                if not self._running or (
+                    self._aggressive_snapshot_ops is not None
+                    and self._aggressive_snapshot_ops.is_shutdown_requested()
+                ):
+                    break
+                if not self._sleep_interruptible_aggressive_snapshot_loop(interval):
+                    break
+            except Exception as e:
+                log.error(f"Error in aggressive snapshot operation loop: {e}")
+                if not self._sleep_interruptible_aggressive_snapshot_loop(10):
+                    break
+        log.info("Aggressive snapshot operation loop stopped")
+
+    def _sleep_interruptible_aggressive_snapshot_loop(self, seconds: float) -> bool:
+        deadline = time.time() + seconds
+        while time.time() < deadline and self._running:
+            if (
+                self._aggressive_snapshot_ops is not None
+                and self._aggressive_snapshot_ops.is_shutdown_requested()
+            ):
+                return False
+            time.sleep(min(5, max(0, deadline - time.time())))
+        return self._running
+
+    def _get_aggressive_snapshot_stop_join_timeout(self) -> int:
+        try:
+            if self._aggressive_snapshot_ops is None:
+                from ocs_ci.krkn_chaos.aggressive_snapshot_operations import (
+                    AggressiveSnapshotOperations,
+                )
+
+                self._aggressive_snapshot_ops = AggressiveSnapshotOperations(self)
+            return int(
+                self._aggressive_snapshot_ops._get_config().get(
+                    "stop_join_timeout", 300
+                )
+            )
+        except Exception:
+            return 300
+
+    def _get_aggressive_snapshot_loop_interval(self) -> int:
+        try:
+            if self._aggressive_snapshot_ops is None:
+                from ocs_ci.krkn_chaos.aggressive_snapshot_operations import (
+                    AggressiveSnapshotOperations,
+                )
+
+                self._aggressive_snapshot_ops = AggressiveSnapshotOperations(self)
+            return self._aggressive_snapshot_ops._get_config().get(
+                "loop_interval", self.operation_interval
+            )
+        except Exception:
+            return self.operation_interval
+
+    def _aggressive_snapshot_operation(self):
+        """Run aggressive PVC snapshot stress operations."""
+        if self._aggressive_snapshot_ops is None:
+            from ocs_ci.krkn_chaos.aggressive_snapshot_operations import (
+                AggressiveSnapshotOperations,
+            )
+
+            self._aggressive_snapshot_ops = AggressiveSnapshotOperations(self)
+        self._aggressive_snapshot_ops.run()
 
     # ==========================================================================
     # Node Taint & Toleration Churn Operations

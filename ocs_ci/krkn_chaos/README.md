@@ -272,6 +272,7 @@ ENV_DATA:
 | `snapshot_lifecycle` | PVC snapshot creation/deletion | Snapshot functionality |
 | `clone_lifecycle` | PVC clone creation/deletion | Clone functionality |
 | `aggressive_clone_operation` | Parallel/nested clone stress, Vdbench on clones, integrity, scale (dedicated loop) | Aggressive clone validation |
+| `aggressive_snapshot_operation` | Parallel/nested snapshot+restore stress, Vdbench on restores, integrity, scale (dedicated loop) | Aggressive snapshot validation |
 | `node_taint_churn` | Node taint/untaint operations | Node scheduling |
 | `osd_operations` | OSD start/stop/restart | Ceph OSD resilience |
 | `mds_failover` | MDS failover testing | CephFS availability |
