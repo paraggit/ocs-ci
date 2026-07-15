@@ -116,7 +116,9 @@ class TestCephXKeyRotationNegative:
         ceph_health_check(namespace=namespace)
 
         baseline_generations = rotator.record_all_cephx_status_generations()
-        auth_entities = rotator.discover_all_rotation_auth_entities()
+        auth_entities = rotator.flatten_daemon_auth_entities(
+            rotator.discover_rook_daemon_auth_entities()
+        )
         if not auth_entities:
             pytest.skip("No Ceph auth entities found for rotation verification")
 
@@ -284,6 +286,10 @@ class TestCephXKeyRotationNegative:
         log.info("CephCluster reconcile recovered after single OSD rotation failure")
 
     @tier2
+    @pytest.mark.skip(
+        reason="Bootstrap CephX key cleanup is not covered while only daemon "
+        "key rotation is supported"
+    )
     def test_cephx_bootstrap_deletion_idempotent(self, cephx_bootstrap_setup):
         """
         TC-36: Bootstrap key deletion is idempotent on already-deleted keys.
@@ -573,6 +579,10 @@ class TestCephXKeyRotationNegativeEncryptedCSI:
         log.info("Disk-based encrypted OSD label and lockbox rotation verified")
 
     @tier2
+    @pytest.mark.skip(
+        reason="CSI CephX key rotation is not supported; only daemon key "
+        "rotation is currently enabled"
+    )
     def test_cephx_csi_rotation_prior_key_count_zero_with_mounted_volume(
         self, cephx_keyrotation_setup, deployment_pod_factory
     ):

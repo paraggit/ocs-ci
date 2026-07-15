@@ -1756,6 +1756,12 @@ ALERT_CEPHFS_ORPHANED_SNAPSHOT = "CephFSOrphanedSnapshot"
 CEPHFS_SNAPSHOT_STATE_ORPHANED = "orphaned"
 CEPHFS_SNAPSHOT_STATE_BOUND = "bound"
 ALERT_MDSXATTR = "CephXattrSetLatency"
+ALERT_CEPHX_KEY_GENERATION_FAILED = "CephxKeyGenerationFailed"
+OCS_CEPHX_DAEMON_KEY_ROTATION_MISMATCH_METRIC = "ocs_cephx_daemon_key_rotation_mismatch"
+CEPHX_CREATED_WITH_FEATURES_ANNOTATION = "ocs.openshift.io/created-with-cephx-features"
+CEPHX_CREATED_AT_DF_VERSION_ANNOTATION = "ocs.openshift.io/created-at-df-version"
+DESIRED_CEPHX_KEY_GEN_ENV = "DESIRED_CEPHX_KEY_GEN"
+DEFAULT_DESIRED_CEPHX_KEY_GEN = 2
 
 # OCS Deployment related constants
 OPERATOR_NODE_LABEL = "cluster.ocs.openshift.io/openshift-storage=''"

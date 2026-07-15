@@ -39,10 +39,10 @@ class TestCephXKeyRotationPolicyDisabled:
         Verify Disabled keyRotationPolicy prevents CephX key rotation.
 
         Steps:
-            1. Ensure keyRotationPolicy is Disabled for daemon, CSI, and RBD mirror.
-            2. Record keyGeneration, auth keys, pod state, and bootstrap keys.
+            1. Ensure keyRotationPolicy is Disabled for daemon (and other components).
+            2. Record keyGeneration, daemon auth keys, pod state, and bootstrap keys.
             3. Trigger multiple CephCluster reconciles.
-            4. Verify generations, auth keys, pods, and bootstrap keys are unchanged.
+            4. Verify generations, daemon auth keys, pods, and bootstrap keys are unchanged.
         """
         rotator = cephx_rotation_disabled_setup
         namespace = config.ENV_DATA["cluster_namespace"]
@@ -64,12 +64,14 @@ class TestCephXKeyRotationPolicyDisabled:
                     f"{EXPECTED_INITIAL_GENERATION} on fresh clusters"
                 )
 
-        auth_entities = rotator.discover_all_rotation_auth_entities()
+        auth_entities = rotator.flatten_daemon_auth_entities(
+            rotator.discover_rook_daemon_auth_entities()
+        )
         if not auth_entities:
             pytest.skip("No Ceph auth entities found for rotation verification")
 
         log.info(
-            "Auth entities tracked for no-rotation verification: "
+            "Daemon auth entities tracked for no-rotation verification: "
             f"{', '.join(auth_entities)}"
         )
         pre_auth_keys = rotator.capture_auth_keys(

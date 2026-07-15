@@ -27,6 +27,10 @@ from ocs_ci.utility.utils import ceph_health_check
 
 log = logging.getLogger(__name__)
 
+pytestmark = pytest.mark.skip(
+    reason="Only daemon CephX key rotation is currently supported"
+)
+
 
 @skipif_external_mode
 @skipif_ocs_version("<4.19")

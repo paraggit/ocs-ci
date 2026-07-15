@@ -3,7 +3,7 @@ CephX Key Rotation — Daemon Rotation and Cluster Health
 
 TC-01/02/03: Rook daemon rotation, consecutive rotations, OSD init container.
 Idempotency after operator re-reconcile.
-I/O continuity during full key rotation.
+I/O continuity during daemon key rotation.
 """
 
 import logging
@@ -373,11 +373,11 @@ class TestCephXKeyRotationIdempotency:
     @tier1
     def test_cephx_key_rotation_rereconcile_idempotent(self, cephx_keyrotation_setup):
         """
-        Verify operator re-reconcile does not trigger a second CephX key rotation.
+        Verify operator re-reconcile does not trigger a second daemon CephX key rotation.
 
         Steps:
-            1. Ensure CephX key rotation is enabled on the cluster.
-            2. Trigger full key rotation and wait for completion.
+            1. Ensure daemon CephX key rotation is enabled on the cluster.
+            2. Trigger daemon key rotation and wait for completion.
             3. Record keyGeneration values, auth keys, pod state, and OSD cephx-status.
             4. Restart rook-ceph-operator and wait for reconciliation.
             5. Re-check generations, auth keys, pod state, and operator logs.
@@ -394,16 +394,17 @@ class TestCephXKeyRotationIdempotency:
 
         ceph_health_check(namespace=namespace)
 
-        log.info("Triggering full CephX key rotation")
-        generations = rotator.rotate_all_keys()
-        log.info(f"Requested key generations: {generations}")
-        rotator.wait_for_all_key_rotations(generations, timeout=1500)
+        target_generation = rotator.rotate_daemon_keys()
+        log.info(f"Triggered daemon CephX rotation to generation {target_generation}")
+        rotator.wait_for_rook_daemon_rotation(target_generation, timeout=1500)
 
         baseline_generations = rotator.record_all_cephx_status_generations()
         rotator.log_generation_status("Post-rotation baseline")
         log.info(f"Baseline CephX status generations: {baseline_generations}")
 
-        auth_entities = rotator.discover_all_rotation_auth_entities()
+        auth_entities = rotator.flatten_daemon_auth_entities(
+            rotator.discover_rook_daemon_auth_entities()
+        )
         if not auth_entities:
             pytest.skip("No Ceph auth entities found for idempotency verification")
 
@@ -434,8 +435,8 @@ class TestCephXKeyRotationIdempotency:
         ceph_health_check(namespace=namespace)
         rotator.wait_for_pgs_active_clean()
         log.info(
-            "CephX key rotation idempotency after operator re-reconcile verified "
-            f"(restarted operator pod {previous_operator_pod})"
+            "Daemon CephX key rotation idempotency after operator re-reconcile "
+            f"verified (restarted operator pod {previous_operator_pod})"
         )
 
 
@@ -448,11 +449,11 @@ class TestCephXKeyRotationIOContinuity:
         self, cephx_keyrotation_setup, deployment_pod_factory
     ):
         """
-        Verify cluster health and I/O continuity during full CephX key rotation.
+        Verify cluster health and I/O continuity during daemon CephX key rotation.
 
         Steps:
             1. Create RBD and CephFS PVCs mounted to pods; start continuous dd I/O.
-            2. Trigger full key rotation (daemon, CSI, RBD mirror peer).
+            2. Trigger daemon key rotation.
             3. Monitor I/O during rotation — verify background threads stay alive.
             4. After rotation, verify I/O files are intact and readable.
             5. Verify no AUTH_BAD_KEY errors in workload and daemon pod logs.
@@ -481,11 +482,10 @@ class TestCephXKeyRotationIOContinuity:
             cephfs_pod, CEPHFS_IO_FILE, bs=DD_BS, count=DD_COUNT
         )
 
-        log.info("Triggering full CephX key rotation for all components")
-        generations = rotator.rotate_all_keys()
-        log.info(f"Requested key generations: {generations}")
+        target_generation = rotator.rotate_daemon_keys()
+        log.info(f"Triggered daemon CephX rotation to generation {target_generation}")
 
-        rotator.wait_for_all_key_rotations(generations, timeout=1500)
+        rotator.wait_for_rook_daemon_rotation(target_generation, timeout=1500)
 
         if not rbd_io_thread.is_alive():
             raise UnexpectedBehaviour(
@@ -536,5 +536,5 @@ class TestCephXKeyRotationIOContinuity:
 
         ceph_health_check(namespace=namespace)
         log.info(
-            "Cluster health and I/O continuity verified during full CephX key rotation"
+            "Cluster health and I/O continuity verified during daemon CephX key rotation"
         )
