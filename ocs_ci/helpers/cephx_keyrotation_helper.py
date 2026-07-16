@@ -963,6 +963,23 @@ class CephXKeyRotation:
         """
         return self.get_current_rook_daemon_key_generation() + 1
 
+    def get_component_status_key_generation(self, component):
+        """
+        Return the highest reported status keyGeneration for *component*.
+
+        Used to decide whether a StorageCluster write will trigger an actual
+        CephX rotation (Progressing) versus a no-op / policy-only update.
+        """
+        self._validate_component(component)
+        if component == self.COMPONENT_DAEMON:
+            current = 0
+            for entity in self.ROOK_DAEMON_STATUS_ENTITIES:
+                current = max(current, self.get_status_key_generation(entity))
+            return max(current, self.get_filesystem_daemon_key_generation())
+        if component == self.COMPONENT_CSI:
+            return self.get_status_key_generation("csi")
+        return self.get_status_key_generation("rbdMirrorPeer")
+
     def rotate_component_keys(
         self,
         component,
@@ -974,6 +991,11 @@ class CephXKeyRotation:
 
         All components patch StorageCluster
         ``managedResources.cephCluster.security.cephx.<component>``.
+
+        Waits for CephCluster Progressing→Ready only when *key_generation*
+        is greater than the current status generation (an actual rotation).
+        Policy-only or same-generation writes skip that wait so setup/idempotent
+        paths do not hang on Ready forever.
 
         Args:
             component (str): ``daemon``, ``csi``, or ``rbdMirrorPeer``.
@@ -989,11 +1011,13 @@ class CephXKeyRotation:
         self._validate_component(component)
         if key_generation is None:
             key_generation = self.get_next_key_generation(component)
+        key_generation = int(key_generation)
+        pre_status_generation = self.get_component_status_key_generation(component)
 
         # Preserve sibling fields (e.g. keyType) already set on StorageCluster.
         component_config = dict(self.get_storagecluster_component_spec(component))
         component_config["keyRotationPolicy"] = self.KEY_ROTATION_POLICY_KEY_GENERATION
-        component_config["keyGeneration"] = int(key_generation)
+        component_config["keyGeneration"] = key_generation
         if component == self.COMPONENT_CSI and keep_prior_key_count_max is not None:
             component_config["keepPriorKeyCountMax"] = int(keep_prior_key_count_max)
 
@@ -1005,9 +1029,21 @@ class CephXKeyRotation:
             f"{self.namespace}/{constants.DEFAULT_CLUSTERNAME}"
         )
         self.patch_storagecluster_cephx_component(component, component_config)
-        self.wait_for_cephcluster_rotation(timeout=900, sleep=15)
+        if key_generation > pre_status_generation:
+            log.info(
+                f"Generation increased for {component} "
+                f"({pre_status_generation} -> {key_generation}); "
+                "waiting for CephCluster Progressing→Ready"
+            )
+            self.wait_for_cephcluster_rotation(timeout=900, sleep=15)
+        else:
+            log.info(
+                f"No status generation increase for {component} "
+                f"(status={pre_status_generation}, written={key_generation}); "
+                "skipping CephCluster Progressing wait"
+            )
         self.wait_for_storagecluster_reconciliation(timeout=600, sleep=10)
-        return int(key_generation)
+        return key_generation
 
     def rotate_daemon_keys(self, key_generation=None):
         """Rotate internal Ceph daemon CephX keys."""
