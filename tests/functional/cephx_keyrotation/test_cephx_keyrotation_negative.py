@@ -11,9 +11,11 @@ TC-34: Lockbox key preserved when lockbox rotation init container fails.
 TC-NEG-15: Disk-based encrypted OSD deployments carry encrypted=true label.
 TC-36: Bootstrap key deletion is idempotent on already-deleted keys.
 TC-37: CSI key rotation with priorKeyCount 0 and mounted volumes.
+TC-38: Decreasing StorageCluster daemon keyGeneration is rejected.
 """
 
 import logging
+import time
 
 import pytest
 
@@ -284,6 +286,83 @@ class TestCephXKeyRotationNegative:
         ceph_health_check(namespace=namespace)
         rotator.wait_for_cluster_ready()
         log.info("CephCluster reconcile recovered after single OSD rotation failure")
+
+    @tier2
+    @skipif_ocs_version("<4.22")
+    def test_cephx_daemon_key_generation_decrease_rejected(
+        self, cephx_keyrotation_setup
+    ):
+        """
+        TC-38: Decreasing StorageCluster daemon keyGeneration is rejected.
+
+        Steps:
+            1. Record CephCluster daemon keyGeneration / Ready phases and
+               StorageCluster daemon keyGeneration.
+            2. Patch StorageCluster daemon keyGeneration to a lower value.
+            3. Expect admission error: keyGeneration cannot be decreased.
+            4. Verify StorageCluster and CephCluster generations and phases
+               are unchanged (no reconcile / state change).
+        """
+        rotator = cephx_keyrotation_setup
+        namespace = config.ENV_DATA["cluster_namespace"]
+
+        ceph_health_check(namespace=namespace)
+        rotator.wait_for_cluster_ready()
+
+        pre_daemon_generations = rotator.record_daemon_generations()
+        pre_all_generations = rotator.record_all_cephx_status_generations()
+        pre_sc_generation = rotator.get_spec_key_generation(rotator.COMPONENT_DAEMON)
+        pre_cc_phase = rotator.get_cephcluster_phase()
+        pre_sc_phase = rotator.get_storagecluster_phase()
+        rotator.log_generation_status("Pre-decrease-reject")
+
+        if pre_sc_generation < 1:
+            pytest.skip(
+                "StorageCluster daemon keyGeneration is unset; decrease "
+                "rejection requires an existing generation"
+            )
+
+        lower_generation = pre_sc_generation - 1
+        log.info(
+            "Current StorageCluster daemon keyGeneration=%s; CephCluster "
+            "daemon generations=%s; attempting decrease to %s",
+            pre_sc_generation,
+            pre_daemon_generations,
+            lower_generation,
+        )
+
+        rotator.assert_decreasing_daemon_key_generation_rejected(lower_generation)
+
+        # Brief settle so a mistaken reconcile would be visible in phase/gens.
+        time.sleep(15)
+
+        post_sc_generation = rotator.get_spec_key_generation(rotator.COMPONENT_DAEMON)
+        post_cc_phase = rotator.get_cephcluster_phase()
+        post_sc_phase = rotator.get_storagecluster_phase()
+        assert post_sc_generation == pre_sc_generation, (
+            "StorageCluster daemon keyGeneration changed after rejected "
+            f"decrease: before={pre_sc_generation}, after={post_sc_generation}"
+        )
+        assert post_cc_phase == pre_cc_phase == constants.STATUS_READY, (
+            "CephCluster phase changed after rejected keyGeneration decrease: "
+            f"before={pre_cc_phase}, after={post_cc_phase}"
+        )
+        assert post_sc_phase == pre_sc_phase == constants.STATUS_READY, (
+            "StorageCluster phase changed after rejected keyGeneration decrease: "
+            f"before={pre_sc_phase}, after={post_sc_phase}"
+        )
+        rotator.assert_cephx_status_generations_unchanged(
+            pre_all_generations,
+            context="after rejected daemon keyGeneration decrease",
+        )
+
+        ceph_health_check(namespace=namespace)
+        rotator.wait_for_cluster_ready()
+        log.info(
+            "TC-38: decreasing daemon keyGeneration to %s was rejected; "
+            "StorageCluster/CephCluster state unchanged",
+            lower_generation,
+        )
 
     @tier2
     @pytest.mark.skip(

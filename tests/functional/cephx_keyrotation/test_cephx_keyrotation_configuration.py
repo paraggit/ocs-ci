@@ -1,7 +1,8 @@
 """
 CephX Key Rotation — Security Configuration
 
-Policy disabled, allowedCiphers passthrough, and custom keyType selection.
+Policy disabled, allowedCiphers defaults/custom StorageCluster config, and
+custom keyType selection.
 """
 
 import logging
@@ -112,7 +113,7 @@ class TestCephXKeyRotationPolicyDisabled:
 class TestCephXAllowedCiphers:
     @pytest.fixture(autouse=True)
     def _teardown(self, request):
-        """Restore StorageCluster security passthrough after custom cipher test."""
+        """Restore StorageCluster security after custom cipher test."""
         request.node._cephx_reconcile_strategy_restore = None
 
         def fin():
@@ -147,16 +148,18 @@ class TestCephXAllowedCiphers:
     @tier1
     def test_cephx_allowed_ciphers_configuration(self, cephx_bootstrap_setup, request):
         """
-        Verify default and custom allowedCiphers passthrough from StorageCluster.
+        Verify default CephCluster allowedCiphers and StorageCluster custom config.
 
         Part A — Default ciphers:
             1. Confirm StorageCluster does not specify allowedCiphers.
             2. Verify CephCluster spec.security.cephx.allowedCiphers defaults to
                ["aes", "aes256k"].
 
-        Part B — Custom ciphers:
+        Part B — Custom StorageCluster ciphers:
             3. Patch StorageCluster with custom allowedCiphers (["aes256k"]).
-            4. Wait for reconciliation and verify CephCluster mirrors the override.
+            4. Verify StorageCluster retains the custom value.
+            5. Verify CephCluster keeps the default ["aes", "aes256k"] (operator
+               does not propagate StorageCluster allowedCiphers overrides).
         """
         rotator = cephx_bootstrap_setup
         namespace = config.ENV_DATA["cluster_namespace"]
@@ -171,9 +174,7 @@ class TestCephXAllowedCiphers:
                 sc_ciphers,
             )
         else:
-            log.info(
-                "StorageCluster does not specify allowedCiphers (default passthrough)"
-            )
+            log.info("StorageCluster does not specify allowedCiphers (defaults apply)")
 
         rotator.wait_for_allowed_ciphers(
             constants.CEPHX_DEFAULT_ALLOWED_CIPHERS,
@@ -191,7 +192,8 @@ class TestCephXAllowedCiphers:
         if reconcile_strategy == "ignore":
             log.info(
                 "StorageCluster cephCluster.reconcileStrategy is ignore; "
-                "temporarily setting manage to verify allowedCiphers passthrough"
+                "temporarily setting manage so reconcile can evaluate custom "
+                "allowedCiphers without changing CephCluster defaults"
             )
             request.node._cephx_reconcile_strategy_restore = reconcile_strategy
             rotator.patch_storagecluster_cephcluster_reconcile_strategy("manage")
@@ -204,18 +206,22 @@ class TestCephXAllowedCiphers:
             timeout=600,
             source="storagecluster",
         )
-        rotator.wait_for_allowed_ciphers(constants.CEPHX_CUSTOM_ALLOWED_CIPHERS)
-        rotator.assert_allowed_ciphers(constants.CEPHX_CUSTOM_ALLOWED_CIPHERS)
         rotator.assert_allowed_ciphers(
             constants.CEPHX_CUSTOM_ALLOWED_CIPHERS,
             source="storagecluster",
         )
+        rotator.wait_for_storagecluster_reconciliation(timeout=600)
+        # Operator keeps CephCluster on the default cipher list; custom values
+        # on StorageCluster are accepted but not mirrored to CephCluster.
+        rotator.assert_allowed_ciphers(constants.CEPHX_DEFAULT_ALLOWED_CIPHERS)
         rotator.assert_cephcluster_security_populated()
 
         ceph_health_check(namespace=namespace)
         log.info(
-            "Part B passed: custom allowedCiphers=%s propagated to CephCluster",
+            "Part B passed: StorageCluster allowedCiphers=%s; CephCluster "
+            "remained at defaults %s",
             list(constants.CEPHX_CUSTOM_ALLOWED_CIPHERS),
+            list(constants.CEPHX_DEFAULT_ALLOWED_CIPHERS),
         )
 
 

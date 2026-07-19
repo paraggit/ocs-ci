@@ -5,7 +5,7 @@ Covers:
   A. Alert & metric tests (TC1–TC7)
   B. CephCluster reconciliation (TC8–TC13)
   C. CephClient annotation tests (TC14–TC15)
-  D. Negative / edge cases (TC16–TC18)
+  D. Negative / edge cases (TC16–TC18; TC17 invalid keyGeneration types)
 """
 
 import logging
@@ -186,6 +186,9 @@ def _set_ocs_operator_env_var(namespace, name, value):
     """
     Set or add an env var on ocs-operator deployment and wait for rollout.
 
+    ``value`` may be a string, bool, or ``None`` (sets an empty env value to
+    exercise null-like parsing).
+
     Returns:
         tuple: (previous_value_or_None, existed_bool)
     """
@@ -198,14 +201,25 @@ def _set_ocs_operator_env_var(namespace, name, value):
             existed = True
             break
 
+    if value is None:
+        # Keep the env key present with an empty value (null-like input).
+        env_assignment = f"{name}="
+        value_repr = "null/empty"
+    elif isinstance(value, bool):
+        env_assignment = f"{name}={str(value).lower()}"
+        value_repr = str(value).lower()
+    else:
+        env_assignment = f"{name}={value}"
+        value_repr = str(value)
+
     exec_cmd(
         f"oc set env deployment/{OCS_OPERATOR_DEPLOYMENT} "
-        f"{name}={value} -n {namespace}"
+        f"{env_assignment} -n {namespace}"
     )
     log.info(
         "Set %s=%s on %s (previous=%s)",
         name,
-        value,
+        value_repr,
         OCS_OPERATOR_DEPLOYMENT,
         previous,
     )
@@ -339,9 +353,13 @@ class TestCephXKeyRotationMismatchMetric:
         ceph_health_check(namespace=namespace)
         rotator.wait_for_cluster_ready()
 
-        current = rotator.get_current_rook_daemon_key_generation()
-        if current >= constants.DEFAULT_DESIRED_CEPHX_KEY_GEN:
-            rotator.wait_for_rook_daemon_rotation(current, timeout=900)
+        # Setup only enables policy at DESIRED_CEPHX_KEY_GEN; that does not
+        # advance status.keyGeneration. Wait for status catch-up only when an
+        # actual rotation above the desired baseline has been requested.
+        spec_gen = rotator.get_spec_key_generation(rotator.COMPONENT_DAEMON)
+        desired = rotator.get_desired_cephx_key_gen()
+        if spec_gen > desired:
+            rotator.wait_for_rook_daemon_rotation(spec_gen, timeout=900)
 
         prometheus = PrometheusAPI(threading_lock=threading_lock)
         expected = {daemon: 0 for daemon in DAEMON_TYPES}
@@ -873,7 +891,18 @@ class TestCephXCephClientAnnotations:
 @green_squad
 @ignore_leftovers
 class TestCephXDesiredKeyGenNegative:
-    """TC16–TC17: DESIRED_CEPHX_KEY_GEN env var error handling."""
+    """TC16: DESIRED_CEPHX_KEY_GEN env; TC17: StorageCluster keyGeneration types."""
+
+    # TC17: invalid JSON types for StorageCluster daemon.keyGeneration.
+    # null must be rejected; accepting it deletes keyGeneration from the SC CR
+    # and puts StorageCluster in Error (product bug). Recovery: copy CephCluster
+    # daemon keyGeneration back onto StorageCluster.
+    INVALID_DAEMON_KEY_GENERATION_TYPE_CASES = (
+        pytest.param("16", "string", id="value-string-16"),
+        pytest.param("abc", "string", id="value-string-abc"),
+        pytest.param(True, "boolean", id="value-boolean-true"),
+        pytest.param(None, "null", id="value-null"),
+    )
 
     @pytest.fixture(autouse=True)
     def _restore_desired_env(self, request):
@@ -941,26 +970,59 @@ class TestCephXDesiredKeyGenNegative:
         log.info("TC16: operator reported missing DESIRED_CEPHX_KEY_GEN")
 
     @tier2
-    def test_desired_cephx_key_gen_non_numeric_errors(self, cephx_bootstrap_setup):
+    @pytest.mark.parametrize(
+        "invalid_value, expected_json_type",
+        INVALID_DAEMON_KEY_GENERATION_TYPE_CASES,
+    )
+    def test_storagecluster_daemon_key_generation_invalid_type_rejected(
+        self, cephx_bootstrap_setup, invalid_value, expected_json_type
+    ):
         """
-        TC17: Non-numeric DESIRED_CEPHX_KEY_GEN causes a conversion error.
-        """
-        _set_ocs_operator_env_var(
-            self._namespace, constants.DESIRED_CEPHX_KEY_GEN_ENV, "abc"
-        )
-        rotator = cephx_bootstrap_setup
-        rotator.trigger_cephcluster_reconcile()
-        time.sleep(30)
+        TC17: StorageCluster rejects non-integer daemon keyGeneration patches.
 
-        pods = get_pods_having_label(
-            constants.OCS_OPERATOR_LABEL, namespace=self._namespace
+        Parametrized over JSON values that must fail OpenAPI validation:
+          - ``"16"`` / ``"abc"`` → must be of type integer: "string"
+          - ``true`` → must be of type integer: "boolean"
+          - ``null`` → must be of type integer: "null"
+            (product bug: null deletes keyGeneration from SC CR → Error)
+
+        Patch must not succeed; StorageCluster / CephCluster state unchanged.
+        """
+        rotator = cephx_bootstrap_setup
+        namespace = config.ENV_DATA["cluster_namespace"]
+
+        ceph_health_check(namespace=namespace)
+        rotator.wait_for_cluster_ready()
+
+        # Ensure daemon.keyGeneration exists so replace exercises type checks.
+        rotator.ensure_daemon_key_rotation_enabled()
+
+        pre_generations = rotator.record_all_cephx_status_generations()
+        pre_sc_generation = rotator.get_spec_key_generation(rotator.COMPONENT_DAEMON)
+        pre_cc_phase = rotator.get_cephcluster_phase()
+        pre_sc_phase = rotator.get_storagecluster_phase()
+
+        rotator.assert_invalid_daemon_key_generation_type_rejected(
+            invalid_value, expected_json_type
         )
-        assert pods, "ocs-operator pod not found"
-        logs = get_pod_logs(pods[0]["metadata"]["name"])
+
+        time.sleep(10)
         assert (
-            "abc" in logs and constants.DESIRED_CEPHX_KEY_GEN_ENV in logs
-        ), "TC17: expected conversion error mentioning value 'abc' and env var name"
-        assert any(
-            token in logs.lower() for token in ("convert", "parse", "invalid", "error")
-        ), "TC17: expected conversion/parse error in operator logs"
-        log.info("TC17: operator reported non-numeric DESIRED_CEPHX_KEY_GEN error")
+            rotator.get_spec_key_generation(rotator.COMPONENT_DAEMON)
+            == pre_sc_generation
+        ), "StorageCluster daemon keyGeneration changed after rejected type patch"
+        assert (
+            rotator.get_cephcluster_phase() == pre_cc_phase == constants.STATUS_READY
+        ), "CephCluster phase changed after rejected keyGeneration type patch"
+        assert (
+            rotator.get_storagecluster_phase() == pre_sc_phase == constants.STATUS_READY
+        ), "StorageCluster phase changed after rejected keyGeneration type patch"
+        rotator.assert_cephx_status_generations_unchanged(
+            pre_generations,
+            context="after rejected non-integer daemon keyGeneration patch",
+        )
+        log.info(
+            "TC17: StorageCluster rejected daemon keyGeneration type=%s value=%r",
+            expected_json_type,
+            invalid_value,
+        )

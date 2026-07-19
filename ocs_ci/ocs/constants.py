@@ -1762,6 +1762,8 @@ CEPHX_CREATED_WITH_FEATURES_ANNOTATION = "ocs.openshift.io/created-with-cephx-fe
 CEPHX_CREATED_AT_DF_VERSION_ANNOTATION = "ocs.openshift.io/created-at-df-version"
 DESIRED_CEPHX_KEY_GEN_ENV = "DESIRED_CEPHX_KEY_GEN"
 DEFAULT_DESIRED_CEPHX_KEY_GEN = 2
+CEPHX_KEY_GENERATION_DECREASE_ERROR = "keyGeneration cannot be decreased"
+CEPHX_KEY_GENERATION_TYPE_ERROR = "must be of type integer"
 
 # OCS Deployment related constants
 OPERATOR_NODE_LABEL = "cluster.ocs.openshift.io/openshift-storage=''"

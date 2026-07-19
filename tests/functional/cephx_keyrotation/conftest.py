@@ -13,6 +13,10 @@ def cephx_keyrotation_setup():
     Prepare cluster for CephX key rotation TC-01:
       - enable daemon KeyGeneration policy on StorageCluster
       - wait for mon/mgr/osd/mds daemons and cluster Ready state
+
+    Enabling at DESIRED_CEPHX_KEY_GEN / DEFAULT_DAEMON_KEY_GENERATION only
+    updates StorageCluster; CephCluster does not Progress and status may stay
+    at keyGeneration 1. Do not wait for status to reach the desired baseline.
     """
     rotator = CephXKeyRotation()
     rotator.ensure_daemon_key_rotation_enabled(
@@ -20,11 +24,6 @@ def cephx_keyrotation_setup():
     )
     rotator.wait_for_rook_daemon_pods_ready()
     rotator.wait_for_cluster_ready()
-
-    initial_generation = rotator.get_spec_key_generation(rotator.COMPONENT_DAEMON)
-    if initial_generation >= CephXKeyRotation.DEFAULT_DAEMON_KEY_GENERATION:
-        rotator.wait_for_rook_daemon_rotation(initial_generation, timeout=900)
-
     return rotator
 
 

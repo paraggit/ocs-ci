@@ -304,6 +304,255 @@ class CephXKeyRotation:
         )
         self._storagecluster_obj = None
 
+    def get_cephcluster_phase(self):
+        """Return CephCluster ``status.phase``."""
+        status = self._get_cluster_dict().get("status") or {}
+        return status.get("phase")
+
+    def get_storagecluster_phase(self):
+        """Return StorageCluster ``status.phase``."""
+        status = self._get_storage_cluster_dict().get("status") or {}
+        return status.get("phase")
+
+    def assert_decreasing_daemon_key_generation_rejected(self, lower_generation=None):
+        """
+        Assert StorageCluster rejects decreasing daemon ``keyGeneration``.
+
+        Patches ``managedResources.cephCluster.security.cephx.daemon.keyGeneration``
+        to a value lower than the current StorageCluster generation and expects
+        admission validation failure containing
+        ``constants.CEPHX_KEY_GENERATION_DECREASE_ERROR``.
+
+        Args:
+            lower_generation (int): Explicit lower generation. Defaults to
+                current StorageCluster generation - 1.
+
+        Returns:
+            int: The rejected lower generation that was attempted.
+
+        Raises:
+            UnexpectedBehaviour: If the patch succeeds or fails with an
+                unexpected error.
+        """
+        current_generation = self.get_spec_key_generation(self.COMPONENT_DAEMON)
+        if current_generation < 1:
+            raise UnexpectedBehaviour(
+                "StorageCluster daemon keyGeneration is unset; cannot verify "
+                "decrease rejection"
+            )
+
+        if lower_generation is None:
+            lower_generation = current_generation - 1
+        lower_generation = int(lower_generation)
+        if lower_generation >= current_generation:
+            raise UnexpectedBehaviour(
+                f"lower_generation={lower_generation} must be < current "
+                f"StorageCluster keyGeneration={current_generation}"
+            )
+
+        component_config = dict(
+            self.get_storagecluster_component_spec(self.COMPONENT_DAEMON)
+        )
+        component_config["keyRotationPolicy"] = self.KEY_ROTATION_POLICY_KEY_GENERATION
+        component_config["keyGeneration"] = lower_generation
+
+        log.info(
+            "Attempting to decrease StorageCluster daemon keyGeneration "
+            f"{current_generation} -> {lower_generation} (expect rejection)"
+        )
+        try:
+            self.patch_storagecluster_cephx_component(
+                self.COMPONENT_DAEMON, component_config
+            )
+        except CommandFailed as exc:
+            err = str(exc)
+            if constants.CEPHX_KEY_GENERATION_DECREASE_ERROR not in err:
+                raise UnexpectedBehaviour(
+                    "Expected StorageCluster admission error containing "
+                    f"'{constants.CEPHX_KEY_GENERATION_DECREASE_ERROR}', got: {err}"
+                )
+            log.info(
+                "StorageCluster correctly rejected daemon keyGeneration decrease "
+                f"to {lower_generation}"
+            )
+            return lower_generation
+
+        raise UnexpectedBehaviour(
+            "StorageCluster accepted a decreased daemon keyGeneration "
+            f"({current_generation} -> {lower_generation}); expected rejection"
+        )
+
+    def assert_invalid_daemon_key_generation_type_rejected(
+        self, invalid_value, expected_json_type
+    ):
+        """
+        Assert StorageCluster rejects non-integer daemon ``keyGeneration``.
+
+        Patches only
+        ``/spec/managedResources/cephCluster/security/cephx/daemon/keyGeneration``
+        with a non-integer JSON value and expects OpenAPI validation failure:
+        ``must be of type integer: "<expected_json_type>"``.
+
+        Args:
+            invalid_value: Value to patch (e.g. ``"abc"``, ``True``, ``None``).
+            expected_json_type (str): Reported JSON type in the error
+                (``string``, ``boolean``, or ``null``).
+
+        Returns:
+            str: Admission error text.
+
+        Raises:
+            UnexpectedBehaviour: If the patch succeeds or fails unexpectedly.
+                For ``null``, a successful patch is a product bug: Kubernetes
+                deletes ``keyGeneration`` from the StorageCluster CR and the
+                cluster goes to Error. Recovery copies CephCluster's daemon
+                ``keyGeneration`` back onto StorageCluster before raising.
+        """
+        daemon_spec = self.get_storagecluster_component_spec(self.COMPONENT_DAEMON)
+        path = "/spec/managedResources/cephCluster/security/cephx/daemon/keyGeneration"
+        op = "replace" if "keyGeneration" in daemon_spec else "add"
+        # Ensure parent daemon object exists before adding keyGeneration.
+        if op == "add" and not daemon_spec:
+            restore_generation = max(
+                self.DEFAULT_DAEMON_KEY_GENERATION,
+                self.get_desired_cephx_key_gen(),
+            )
+            self.patch_storagecluster_cephx_component(
+                self.COMPONENT_DAEMON,
+                {
+                    "keyRotationPolicy": self.KEY_ROTATION_POLICY_KEY_GENERATION,
+                    "keyGeneration": restore_generation,
+                },
+            )
+            op = "replace"
+
+        patch_ops = [{"op": op, "path": path, "value": invalid_value}]
+        value_repr = (
+            "null"
+            if invalid_value is None
+            else (
+                str(invalid_value).lower()
+                if isinstance(invalid_value, bool)
+                else repr(invalid_value)
+            )
+        )
+        log.info(
+            "Attempting invalid StorageCluster daemon keyGeneration=%s "
+            "(expect type integer rejection, json type=%s)",
+            value_repr,
+            expected_json_type,
+        )
+        try:
+            self._get_storagecluster_ocp().patch(
+                params=json.dumps(patch_ops), format_type="json"
+            )
+        except CommandFailed as exc:
+            err = str(exc)
+            if constants.CEPHX_KEY_GENERATION_TYPE_ERROR not in err:
+                raise UnexpectedBehaviour(
+                    "Expected StorageCluster type validation error containing "
+                    f"'{constants.CEPHX_KEY_GENERATION_TYPE_ERROR}', got: {err}"
+                )
+            type_token = f'"{expected_json_type}"'
+            if type_token not in err and expected_json_type not in err:
+                raise UnexpectedBehaviour(
+                    "Expected type validation error to mention JSON type "
+                    f"{type_token}, got: {err}"
+                )
+            log.info(
+                "StorageCluster correctly rejected non-integer daemon "
+                f"keyGeneration={value_repr}"
+            )
+            return err
+
+        # Product bug path (null): patch is accepted, keyGeneration is deleted
+        # from the StorageCluster CR, and SC can go Error. Recover by copying
+        # the CephCluster daemon keyGeneration back onto StorageCluster.
+        post_daemon = self.get_storagecluster_component_spec(self.COMPONENT_DAEMON)
+        field_deleted = "keyGeneration" not in post_daemon
+        if invalid_value is None and field_deleted:
+            log.warning(
+                "Product bug: null patch deleted daemon.keyGeneration from "
+                "StorageCluster CR (daemon spec now: %s)",
+                post_daemon,
+            )
+        try:
+            self.recover_storagecluster_daemon_key_generation_from_cephcluster()
+        except Exception as restore_exc:
+            log.error(
+                "Failed to restore daemon keyGeneration from CephCluster after "
+                "accepted invalid patch %s: %s",
+                value_repr,
+                restore_exc,
+            )
+
+        bug_detail = ""
+        if invalid_value is None:
+            bug_detail = (
+                " (product bug: null deletes keyGeneration from StorageCluster "
+                "CR and StorageCluster goes to Error)"
+                if field_deleted
+                else " (product bug: null keyGeneration was accepted)"
+            )
+        raise UnexpectedBehaviour(
+            "StorageCluster accepted non-integer daemon keyGeneration="
+            f"{value_repr}; expected type validation rejection{bug_detail}"
+        )
+
+    def get_cephcluster_daemon_key_generation(self):
+        """
+        Return CephCluster daemon ``keyGeneration`` for SC recovery.
+
+        Prefers ``spec.security.cephx.daemon.keyGeneration`` when set; otherwise
+        uses the highest reported ``status.cephx`` daemon generation.
+        """
+        cc_daemon = self.get_spec_cephx().get("daemon") or {}
+        if cc_daemon.get("keyGeneration") is not None:
+            return int(cc_daemon["keyGeneration"])
+        return int(self.get_component_status_key_generation(self.COMPONENT_DAEMON) or 0)
+
+    def recover_storagecluster_daemon_key_generation_from_cephcluster(self):
+        """
+        Restore StorageCluster daemon ``keyGeneration`` from CephCluster.
+
+        Used when a bad patch (e.g. ``null``) deleted the field from
+        StorageCluster and left the cluster in Error. Copies the CephCluster
+        daemon generation onto StorageCluster and waits for Ready.
+        """
+        path = "/spec/managedResources/cephCluster/security/cephx/daemon/keyGeneration"
+        restore_generation = self.get_cephcluster_daemon_key_generation()
+        if not restore_generation:
+            raise UnexpectedBehaviour(
+                "Cannot recover StorageCluster daemon keyGeneration: "
+                "CephCluster has no daemon keyGeneration in spec or status"
+            )
+
+        post_daemon = self.get_storagecluster_component_spec(self.COMPONENT_DAEMON)
+        restore_op = "replace" if "keyGeneration" in post_daemon else "add"
+        log.warning(
+            "Recovering StorageCluster daemon keyGeneration=%s from CephCluster "
+            "(op=%s)",
+            restore_generation,
+            restore_op,
+        )
+        self._get_storagecluster_ocp().patch(
+            params=json.dumps(
+                [
+                    {
+                        "op": restore_op,
+                        "path": path,
+                        "value": restore_generation,
+                    }
+                ]
+            ),
+            format_type="json",
+        )
+        self.wait_for_cluster_ready()
+        log.info(
+            "StorageCluster recovered with daemon keyGeneration=%s from CephCluster",
+            restore_generation,
+        )
+
     def assert_allowed_ciphers(self, expected, source="cephcluster"):
         """
         Assert allowedCiphers match *expected* on CephCluster or StorageCluster.
@@ -929,7 +1178,9 @@ class CephXKeyRotation:
         """
         Return a generation value high enough to trigger rotation.
 
-        Uses max(spec, relevant status) + 1.
+        Uses max(spec, relevant status, DESIRED_CEPHX_KEY_GEN) + 1 so a bare
+        ``rotate_*_keys()`` call advances past the operator desired baseline
+        (writing only the baseline does not rotate CephCluster).
         """
         self._validate_component(component)
         current = self.get_spec_key_generation(component)
@@ -937,6 +1188,7 @@ class CephXKeyRotation:
         if component == self.COMPONENT_DAEMON:
             for entity in self.DAEMON_STATUS_ENTITIES:
                 current = max(current, self.get_status_key_generation(entity))
+            current = max(current, self.get_desired_cephx_key_gen())
         elif component == self.COMPONENT_CSI:
             current = max(current, self.get_status_key_generation("csi"))
         elif component == self.COMPONENT_RBD_MIRROR_PEER:
@@ -946,20 +1198,23 @@ class CephXKeyRotation:
 
     def get_current_rook_daemon_key_generation(self):
         """
-        Return the highest daemon keyGeneration across spec and status.
+        Return the highest daemon keyGeneration across spec, status, and desired.
 
-        Includes MON, MGR, and OSD on CephCluster plus MDS on CephFilesystem.
+        Includes MON, MGR, and OSD on CephCluster plus MDS on CephFilesystem,
+        and ocs-operator DESIRED_CEPHX_KEY_GEN (greenfield baseline).
         """
         current = self.get_spec_key_generation(self.COMPONENT_DAEMON)
         for entity in self.ROOK_DAEMON_STATUS_ENTITIES:
             current = max(current, self.get_status_key_generation(entity))
-        return max(current, self.get_filesystem_daemon_key_generation())
+        current = max(current, self.get_filesystem_daemon_key_generation())
+        return max(current, self.get_desired_cephx_key_gen())
 
     def get_next_rook_daemon_key_generation(self):
         """
         Return a generation value to trigger rotation for Rook daemons only.
 
-        Considers MON, MGR, and OSD on CephCluster plus MDS on CephFilesystem.
+        Considers MON, MGR, and OSD on CephCluster plus MDS on CephFilesystem
+        and DESIRED_CEPHX_KEY_GEN.
         """
         return self.get_current_rook_daemon_key_generation() + 1
 
@@ -980,6 +1235,77 @@ class CephXKeyRotation:
             return self.get_status_key_generation("csi")
         return self.get_status_key_generation("rbdMirrorPeer")
 
+    def get_desired_cephx_key_gen(self):
+        """
+        Return ocs-operator ``DESIRED_CEPHX_KEY_GEN``, or the framework default.
+
+        Greenfield clusters already reconcile to this baseline. Patching
+        StorageCluster ``keyGeneration`` to the same value does not make
+        CephCluster enter Progressing.
+        """
+        try:
+            deploy = OCP(
+                kind=constants.DEPLOYMENT,
+                namespace=self.namespace,
+                resource_name="ocs-operator",
+            ).get()
+            containers = (
+                deploy.get("spec", {})
+                .get("template", {})
+                .get("spec", {})
+                .get("containers")
+                or []
+            )
+            for item in (containers[0].get("env") or []) if containers else []:
+                if item.get("name") == constants.DESIRED_CEPHX_KEY_GEN_ENV:
+                    return int(item.get("value") or 0) or (
+                        constants.DEFAULT_DESIRED_CEPHX_KEY_GEN
+                    )
+        except Exception as exc:
+            log.debug(
+                "Could not read %s from ocs-operator: %s",
+                constants.DESIRED_CEPHX_KEY_GEN_ENV,
+                exc,
+            )
+        return constants.DEFAULT_DESIRED_CEPHX_KEY_GEN
+
+    def will_storagecluster_key_generation_trigger_rotation(
+        self, component, key_generation
+    ):
+        """
+        Return True when writing *key_generation* should start a CephX rotation.
+
+        CephCluster Progressing is expected only when the written generation is
+        greater than all of:
+          - current StorageCluster spec keyGeneration
+          - current status keyGeneration
+          - ocs-operator DESIRED_CEPHX_KEY_GEN baseline
+
+        Writing the desired baseline (commonly 2) onto StorageCluster is a
+        no-op for CephCluster reconcile — keys are already at that desired
+        level even when status.keyGeneration still reports 1.
+        """
+        self._validate_component(component)
+        key_generation = int(key_generation)
+        pre_spec = self.get_spec_key_generation(component)
+        pre_status = self.get_component_status_key_generation(component)
+        desired_baseline = self.get_desired_cephx_key_gen()
+        threshold = max(pre_spec, pre_status, desired_baseline)
+        will_rotate = key_generation > threshold
+        log.info(
+            "CephX rotation trigger check for %s: written=%s "
+            "pre_spec=%s pre_status=%s desired_baseline=%s threshold=%s "
+            "will_rotate=%s",
+            component,
+            key_generation,
+            pre_spec,
+            pre_status,
+            desired_baseline,
+            threshold,
+            will_rotate,
+        )
+        return will_rotate
+
     def rotate_component_keys(
         self,
         component,
@@ -993,9 +1319,9 @@ class CephXKeyRotation:
         ``managedResources.cephCluster.security.cephx.<component>``.
 
         Waits for CephCluster Progressing→Ready only when *key_generation*
-        is greater than the current status generation (an actual rotation).
-        Policy-only or same-generation writes skip that wait so setup/idempotent
-        paths do not hang on Ready forever.
+        will actually trigger rotation (above StorageCluster spec, status,
+        and DESIRED_CEPHX_KEY_GEN). Policy enable / same-as-desired writes
+        skip that wait so setup paths do not hang on Ready forever.
 
         Args:
             component (str): ``daemon``, ``csi``, or ``rbdMirrorPeer``.
@@ -1012,7 +1338,9 @@ class CephXKeyRotation:
         if key_generation is None:
             key_generation = self.get_next_key_generation(component)
         key_generation = int(key_generation)
-        pre_status_generation = self.get_component_status_key_generation(component)
+        will_rotate = self.will_storagecluster_key_generation_trigger_rotation(
+            component, key_generation
+        )
 
         # Preserve sibling fields (e.g. keyType) already set on StorageCluster.
         component_config = dict(self.get_storagecluster_component_spec(component))
@@ -1029,18 +1357,17 @@ class CephXKeyRotation:
             f"{self.namespace}/{constants.DEFAULT_CLUSTERNAME}"
         )
         self.patch_storagecluster_cephx_component(component, component_config)
-        if key_generation > pre_status_generation:
+        if will_rotate:
             log.info(
-                f"Generation increased for {component} "
-                f"({pre_status_generation} -> {key_generation}); "
-                "waiting for CephCluster Progressing→Ready"
+                f"Generation {key_generation} for {component} should trigger "
+                "rotation; waiting for CephCluster Progressing→Ready"
             )
             self.wait_for_cephcluster_rotation(timeout=900, sleep=15)
         else:
             log.info(
-                f"No status generation increase for {component} "
-                f"(status={pre_status_generation}, written={key_generation}); "
-                "skipping CephCluster Progressing wait"
+                f"Generation {key_generation} for {component} does not exceed "
+                "spec/status/DESIRED_CEPHX_KEY_GEN; skipping CephCluster "
+                "Progressing wait"
             )
         self.wait_for_storagecluster_reconciliation(timeout=600, sleep=10)
         return key_generation
@@ -1467,9 +1794,12 @@ class CephXKeyRotation:
         Ensure StorageCluster daemon CephX uses KeyGeneration policy.
 
         On a fresh cluster (no security block), the default first generation
-        is :attr:`DEFAULT_DAEMON_KEY_GENERATION` (2). Happy-path enable never
-        decreases generation; pass an explicit lower value through
-        :meth:`rotate_component_keys` for negative tests.
+        is :attr:`DEFAULT_DAEMON_KEY_GENERATION` (2), matching
+        ``DESIRED_CEPHX_KEY_GEN``. Enabling at that baseline only updates
+        StorageCluster; CephCluster does not Progress (already at desired).
+
+        Happy-path enable never decreases generation; pass an explicit lower
+        value through :meth:`rotate_component_keys` for negative tests.
 
         Args:
             key_generation (int): Minimum desired generation in spec. Defaults
@@ -1484,21 +1814,23 @@ class CephXKeyRotation:
             key_generation = self.DEFAULT_DAEMON_KEY_GENERATION
 
         spec_generation = self.get_spec_key_generation(self.COMPONENT_DAEMON)
-        current_generation = self.get_current_rook_daemon_key_generation()
+        desired_baseline = self.get_desired_cephx_key_gen()
         daemon_spec = self.get_storagecluster_component_spec(self.COMPONENT_DAEMON)
         policy = daemon_spec.get("keyRotationPolicy")
 
+        # Spec (not status) decides whether StorageCluster already has the
+        # policy/generation. Status may remain 1 while desired/spec is 2.
         if (
             policy == self.KEY_ROTATION_POLICY_KEY_GENERATION
-            and current_generation >= key_generation
+            and spec_generation >= key_generation
         ):
             log.info(
                 "Daemon CephX key rotation already enabled at generation "
-                f"{spec_generation or current_generation}"
+                f"{spec_generation}"
             )
-            return spec_generation or current_generation
+            return spec_generation
 
-        effective_generation = max(key_generation, current_generation)
+        effective_generation = max(key_generation, spec_generation, desired_baseline)
         if effective_generation > key_generation:
             log.info(
                 "Preserving daemon keyGeneration %s (requested minimum %s); "
