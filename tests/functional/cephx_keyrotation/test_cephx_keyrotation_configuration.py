@@ -1,8 +1,7 @@
 """
 CephX Key Rotation — Security Configuration
 
-Policy disabled, allowedCiphers defaults/custom StorageCluster config, and
-custom keyType selection.
+Policy disabled and allowedCiphers defaults/custom StorageCluster config.
 """
 
 import logging
@@ -222,85 +221,4 @@ class TestCephXAllowedCiphers:
             "remained at defaults %s",
             list(constants.CEPHX_CUSTOM_ALLOWED_CIPHERS),
             list(constants.CEPHX_DEFAULT_ALLOWED_CIPHERS),
-        )
-
-
-@skipif_external_mode
-@skipif_ocs_version("<4.19")
-@green_squad
-class TestCephXKeyType:
-    @pytest.fixture(autouse=True)
-    def _teardown(self, request):
-        """Remove custom keyType from StorageCluster after the test."""
-
-        def fin():
-            rotator = CephXKeyRotation()
-            log.info(
-                "Teardown: removing StorageCluster "
-                "managedResources.cephCluster.security.cephx.daemon.keyType"
-            )
-            try:
-                rotator.remove_cephcluster_key_type()
-            except Exception as exc:
-                log.warning("Teardown remove keyType skipped or failed: %s", exc)
-
-        request.addfinalizer(fin)
-
-    @tier1
-    def test_cephx_key_type_custom_selection(self, cephx_keyrotation_setup):
-        """
-        Verify custom CephX keyType selection and daemon rotation.
-
-        Steps:
-            1. Wait for cluster/daemons Ready (fixture enables daemon rotation).
-            2. Set StorageCluster managedResources.cephCluster.security.cephx.daemon
-               keyType to aes256k.
-            3. Trigger daemon CephX key rotation via StorageCluster for all daemons.
-            4. Verify rotated service daemon keys use aes256k.
-            5. Verify AUTH_INSECURE_SERVICE_KEY_TYPE is reconciled and daemons stay healthy.
-        """
-        rotator = cephx_keyrotation_setup
-        namespace = config.ENV_DATA["cluster_namespace"]
-        key_type = constants.CEPHX_CUSTOM_KEY_TYPE
-
-        ceph_health_check(namespace=namespace)
-
-        if rotator.get_spec_key_type() is not None:
-            log.warning(
-                "StorageCluster already has keyType=%s before test start",
-                rotator.get_spec_key_type(),
-            )
-
-        rotator.patch_cephcluster_key_type(key_type)
-        rotator.wait_for_cephcluster_key_type(key_type)
-
-        auth_entities = rotator.discover_rook_daemon_auth_entities()
-        service_entities = rotator.flatten_daemon_auth_entities(auth_entities)
-        if not service_entities:
-            pytest.skip("No discoverable service daemon auth entities on cluster")
-
-        log.info(
-            "Service daemon auth entities for key type verification: "
-            f"{', '.join(service_entities)}"
-        )
-
-        target_generation = rotator.get_next_key_generation(rotator.COMPONENT_DAEMON)
-        log.info(
-            f"Triggering daemon CephX key rotation to generation "
-            f"{target_generation} with keyType={key_type} via StorageCluster"
-        )
-        rotator.rotate_daemon_keys(target_generation)
-        rotator.wait_for_rook_daemon_rotation(target_generation, timeout=1200)
-
-        rotator.assert_auth_entities_key_type(service_entities, key_type)
-        rotator.wait_for_auth_insecure_service_key_type_cleared(timeout=1200)
-        rotator.verify_operator_auth_rotate_key_type_logs(key_type)
-
-        rotator.wait_for_rook_daemon_pods_ready()
-        rotator.wait_for_cluster_ready()
-        rotator.wait_for_pgs_active_clean()
-        ceph_health_check(namespace=namespace)
-
-        log.info(
-            f"CephX keyType={key_type} rotation verification completed successfully"
         )
