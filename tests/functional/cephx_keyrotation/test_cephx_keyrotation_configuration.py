@@ -137,6 +137,7 @@ class TestCephXAllowedCiphers:
                     constants.CEPHX_DEFAULT_ALLOWED_CIPHERS,
                     timeout=600,
                 )
+                rotator.ensure_daemon_key_generations_aligned()
             except Exception as exc:
                 log.warning(
                     "Teardown restore of default allowedCiphers failed: %s", exc

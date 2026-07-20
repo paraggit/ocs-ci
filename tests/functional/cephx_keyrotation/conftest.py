@@ -7,6 +7,33 @@ from ocs_ci.helpers.cephx_keyrotation_helper import CephXKeyRotation
 log = logging.getLogger(__name__)
 
 
+def _align_daemon_key_generations():
+    """Align StorageCluster daemon keyGeneration to CephCluster (teardown)."""
+    try:
+        rotator = CephXKeyRotation()
+        aligned = rotator.ensure_daemon_key_generations_aligned()
+        log.info(
+            "Teardown: StorageCluster/CephCluster daemon keyGeneration aligned "
+            "at %s",
+            aligned,
+        )
+    except Exception as exc:
+        log.warning(
+            "Teardown: failed to align StorageCluster/CephCluster daemon "
+            "keyGeneration: %s",
+            exc,
+        )
+
+
+@pytest.fixture(autouse=True)
+def cephx_align_key_generations_teardown(request):
+    """
+    After every CephX test, ensure StorageCluster and CephCluster daemon
+    keyGeneration values match (CephCluster is the source of truth).
+    """
+    request.addfinalizer(_align_daemon_key_generations)
+
+
 @pytest.fixture(scope="class")
 def cephx_keyrotation_setup():
     """

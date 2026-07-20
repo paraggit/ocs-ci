@@ -384,6 +384,10 @@ class TestCephXKeyRotationMismatchAlertLifecycle:
                 _scale_rook_operator(1, namespace)
             except Exception as exc:
                 log.warning("Teardown scale-up of rook-ceph-operator failed: %s", exc)
+            try:
+                CephXKeyRotation().ensure_daemon_key_generations_aligned()
+            except Exception as exc:
+                log.warning("Teardown: failed to align daemon keyGeneration: %s", exc)
 
         request.addfinalizer(finalizer)
 
@@ -711,6 +715,12 @@ class TestCephXCephClusterReconciliation:
                 )
             except Exception as exc:
                 log.warning("TC12 teardown wait for rotation failed: %s", exc)
+            try:
+                rotator.ensure_daemon_key_generations_aligned()
+            except Exception as exc:
+                log.warning(
+                    "TC12 teardown: failed to align daemon keyGeneration: %s", exc
+                )
 
         request.addfinalizer(restore)
 
@@ -926,6 +936,10 @@ class TestCephXDesiredKeyGenNegative:
                 )
             except Exception as exc:
                 log.warning("Failed to restore DESIRED_CEPHX_KEY_GEN: %s", exc)
+            try:
+                CephXKeyRotation().ensure_daemon_key_generations_aligned()
+            except Exception as exc:
+                log.warning("Teardown: failed to align daemon keyGeneration: %s", exc)
 
         request.addfinalizer(finalizer)
         self._namespace = namespace

@@ -73,6 +73,10 @@ class TestCephXKeyRotationNegative:
                 log.info(f"Teardown: marking osd.{self._osd_marked_out} back in")
                 rotator.set_osd_in(self._osd_marked_out)
                 rotator.wait_for_pgs_active_clean(timeout=900)
+            try:
+                rotator.ensure_daemon_key_generations_aligned()
+            except Exception as exc:
+                log.warning("Teardown: failed to align daemon keyGeneration: %s", exc)
 
         request.addfinalizer(finalizer)
 
@@ -534,6 +538,10 @@ class TestCephXKeyRotationNegativeEncryptedCSI:
                     f"{self._scaled_mon_deployments}"
                 )
                 rotator.restore_mon_deployments(self._scaled_mon_deployments)
+            try:
+                rotator.ensure_daemon_key_generations_aligned()
+            except Exception as exc:
+                log.warning("Teardown: failed to align daemon keyGeneration: %s", exc)
 
         request.addfinalizer(finalizer)
 

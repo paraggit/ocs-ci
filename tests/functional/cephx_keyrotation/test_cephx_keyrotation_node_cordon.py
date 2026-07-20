@@ -18,6 +18,7 @@ from ocs_ci.framework.pytest_customization.marks import (
     skipif_ocs_version,
     tier2,
 )
+from ocs_ci.helpers.cephx_keyrotation_helper import CephXKeyRotation
 from ocs_ci.ocs.node import (
     get_osd_running_nodes,
     schedule_nodes,
@@ -45,6 +46,10 @@ class TestCephXKeyRotationNodeCordon:
             if self._cordoned_node:
                 log.info(f"Teardown: uncordoning node {self._cordoned_node}")
                 schedule_nodes([self._cordoned_node])
+            try:
+                CephXKeyRotation().ensure_daemon_key_generations_aligned()
+            except Exception as exc:
+                log.warning("Teardown: failed to align daemon keyGeneration: %s", exc)
 
         request.addfinalizer(finalizer)
 

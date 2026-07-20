@@ -519,39 +519,112 @@ class CephXKeyRotation:
         StorageCluster and left the cluster in Error. Copies the CephCluster
         daemon generation onto StorageCluster and waits for Ready.
         """
+        self.ensure_daemon_key_generations_aligned()
+
+    def ensure_daemon_key_generations_aligned(self):
+        """
+        Ensure StorageCluster daemon ``keyGeneration`` matches CephCluster.
+
+        CephCluster is the source of truth (spec.daemon.keyGeneration when set,
+        otherwise highest status.cephx daemon generation). StorageCluster is
+        patched to that value. If a direct replace is rejected because
+        keyGeneration cannot be decreased, the field is removed and re-added.
+
+        Returns:
+            int: Aligned daemon keyGeneration.
+
+        Raises:
+            UnexpectedBehaviour: If CephCluster has no generation or StorageCluster
+                still mismatches after alignment.
+        """
         path = "/spec/managedResources/cephCluster/security/cephx/daemon/keyGeneration"
-        restore_generation = self.get_cephcluster_daemon_key_generation()
-        if not restore_generation:
+        cc_generation = self.get_cephcluster_daemon_key_generation()
+        if cc_generation < 1:
             raise UnexpectedBehaviour(
-                "Cannot recover StorageCluster daemon keyGeneration: "
+                "Cannot align StorageCluster daemon keyGeneration: "
                 "CephCluster has no daemon keyGeneration in spec or status"
             )
 
-        post_daemon = self.get_storagecluster_component_spec(self.COMPONENT_DAEMON)
-        restore_op = "replace" if "keyGeneration" in post_daemon else "add"
-        log.warning(
-            "Recovering StorageCluster daemon keyGeneration=%s from CephCluster "
-            "(op=%s)",
-            restore_generation,
-            restore_op,
-        )
-        self._get_storagecluster_ocp().patch(
-            params=json.dumps(
-                [
-                    {
-                        "op": restore_op,
-                        "path": path,
-                        "value": restore_generation,
-                    }
-                ]
-            ),
-            format_type="json",
-        )
-        self.wait_for_cluster_ready()
+        daemon_spec = self.get_storagecluster_component_spec(self.COMPONENT_DAEMON)
+        sc_generation = int(daemon_spec.get("keyGeneration", 0) or 0)
+        if "keyGeneration" in daemon_spec and sc_generation == cc_generation:
+            log.info(
+                "StorageCluster and CephCluster daemon keyGeneration already "
+                f"aligned at {cc_generation}"
+            )
+            return cc_generation
+
+        # Parent daemon object must exist before add/replace of keyGeneration.
+        if not daemon_spec:
+            self.patch_storagecluster_cephx_component(
+                self.COMPONENT_DAEMON,
+                {
+                    "keyRotationPolicy": self.KEY_ROTATION_POLICY_KEY_GENERATION,
+                    "keyGeneration": cc_generation,
+                },
+            )
+            self.wait_for_cluster_ready()
+            aligned = self.get_spec_key_generation(self.COMPONENT_DAEMON)
+            if aligned != cc_generation:
+                raise UnexpectedBehaviour(
+                    "Failed to align StorageCluster daemon keyGeneration: "
+                    f"StorageCluster={aligned}, CephCluster={cc_generation}"
+                )
+            log.info(
+                "Aligned StorageCluster daemon keyGeneration to CephCluster "
+                f"value {cc_generation}"
+            )
+            return cc_generation
+
+        sc_obj = self._get_storagecluster_ocp()
         log.info(
-            "StorageCluster recovered with daemon keyGeneration=%s from CephCluster",
-            restore_generation,
+            "Aligning StorageCluster daemon keyGeneration "
+            f"({sc_generation if 'keyGeneration' in daemon_spec else None}) "
+            f"to CephCluster value {cc_generation}"
         )
+        try:
+            op = "replace" if "keyGeneration" in daemon_spec else "add"
+            sc_obj.patch(
+                params=json.dumps([{"op": op, "path": path, "value": cc_generation}]),
+                format_type="json",
+            )
+        except CommandFailed as exc:
+            err = str(exc)
+            if (
+                "keyGeneration" in daemon_spec
+                and sc_generation > cc_generation
+                and constants.CEPHX_KEY_GENERATION_DECREASE_ERROR in err
+            ):
+                log.warning(
+                    "Direct keyGeneration decrease rejected; removing and "
+                    f"re-adding keyGeneration={cc_generation}"
+                )
+                sc_obj.patch(
+                    params=json.dumps([{"op": "remove", "path": path}]),
+                    format_type="json",
+                )
+                sc_obj.patch(
+                    params=json.dumps(
+                        [{"op": "add", "path": path, "value": cc_generation}]
+                    ),
+                    format_type="json",
+                )
+            else:
+                raise
+
+        self._storagecluster_obj = None
+        self.wait_for_cluster_ready()
+        aligned = self.get_spec_key_generation(self.COMPONENT_DAEMON)
+        if aligned != cc_generation:
+            raise UnexpectedBehaviour(
+                "Failed to align StorageCluster daemon keyGeneration: "
+                f"StorageCluster={aligned}, CephCluster={cc_generation}"
+            )
+        log.info(
+            "Aligned StorageCluster daemon keyGeneration to CephCluster "
+            f"value {cc_generation}"
+        )
+        return cc_generation
 
     def assert_allowed_ciphers(self, expected, source="cephcluster"):
         """
