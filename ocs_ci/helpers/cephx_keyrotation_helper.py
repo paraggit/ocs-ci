@@ -1692,24 +1692,45 @@ class CephXKeyRotation:
 
         Uses a stop-flag file plus ``/proc`` cmdline matching so it works in
         minimal workload images that do not ship ``pkill``/``procps``.
+
+        Skips the stop script's own PID when scanning ``/proc`` — the script
+        text itself contains ``of=<file_path>``, so a naive match would
+        SIGTERM the ``oc rsh`` shell (exit 143). Exit 143 from the stop
+        command is still tolerated as a race with the background dd session.
         """
         stop_flag = self._dd_io_stop_flag(file_path)
         # shlex.quote keeps $pid expansion inside bash -c intact.
+        # Exclude $$ so the stop shell does not match its own cmdline.
         stop_script = (
             f"touch {stop_flag}; "
+            "self=$$; "
             "for pid in /proc/[0-9]*; do "
+            "pidnum=${pid##*/}; "
+            '[ "$pidnum" = "$self" ] && continue; '
             'cmd=$(tr "\\0" " " < "$pid/cmdline" 2>/dev/null) || continue; '
             f'case "$cmd" in '
-            f'*of={file_path}*) kill "${{pid##*/}}" 2>/dev/null || true ;; '
+            f'*dd*of={file_path}*) kill "$pidnum" 2>/dev/null || true ;; '
             "esac; "
             "done; "
             "true"
         )
-        pod_obj.exec_cmd_on_pod(
-            command=f"bash -c {shlex.quote(stop_script)}",
-            out_yaml_format=False,
-            timeout=60,
-        )
+        try:
+            pod_obj.exec_cmd_on_pod(
+                command=f"bash -c {shlex.quote(stop_script)}",
+                out_yaml_format=False,
+                timeout=60,
+            )
+        except CommandFailed as exc:
+            # 143 = 128 + SIGTERM; expected if the stop rsh is terminated
+            # while tearing down the background dd session.
+            if "exit code 143" not in str(exc):
+                raise
+            log.info(
+                "stop_dd_io on %s:%s returned exit 143 (SIGTERM); "
+                "treating background dd as stopped",
+                pod_obj.name,
+                file_path,
+            )
         log.info(f"Stopped background dd I/O on {pod_obj.name}:{file_path}")
 
     def verify_io_file_readable(self, pod_obj, file_path):

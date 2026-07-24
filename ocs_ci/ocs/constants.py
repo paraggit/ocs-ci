@@ -817,10 +817,14 @@ OCS_METRICS_EXPORTER_METRIC_PREFIXES = ("ocs_storagecluster", "ceph_")
 CEPHX_CUSTOM_KEY_TYPE = "aes256k"
 CEPHX_INSECURE_SERVICE_KEY_TYPE_WARN = "AUTH_INSECURE_SERVICE_KEY_TYPE"
 CEPHX_AUTH_ROTATE_KEY_TYPE_OPERATOR_LOG = "--key-type"
+# Substrings that indicate actual CephX auth rotation activity.
+# Do not use broad phrases like "cephx key rotation" — they also match
+# enablement logs such as "enabling cephx key rotation because the cluster
+# is not upgrading" and false-fail idempotency checks.
 CEPHX_KEY_ROTATION_OPERATOR_LOG_PATTERNS = (
     "auth rotate",
     "rotating cephx",
-    "cephx key rotation",
+    "rotating ceph auth key",
 )
 CEPHX_MON_AUTH_ROTATION_LOG_PATTERN = r'rotating ceph auth key.*"mon\.'
 CEPHX_MON_SECRET_UPDATE_LOG = "updating mon secret"
